@@ -1,5 +1,6 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const { stripTracking, thirdPartyResource, removeHeaders } = require('./privacy-rules.cjs');
 
 const LISTS = ['https://easylist.to/easylist/easylist.txt', 'https://easylist.to/easylist/easyprivacy.txt'];
 const LIMIT = 8 * 1024 * 1024;
@@ -88,7 +89,17 @@ class Privacy {
     session.setDisplayMediaRequestHandler((_request, callback) => callback({}));
     const filter = { urls: ['http://*/*', 'https://*/*', 'ws://*/*', 'wss://*/*'] };
     session.webRequest.onBeforeRequest(filter, (details, callback) => {
-      if (!settings().blocking || !this.engine || details.resourceType === 'mainFrame') return callback({});
+      const options = settings();
+      if (options.blockPings && details.resourceType === 'ping') return callback({ cancel: true });
+      if (details.resourceType === 'mainFrame') {
+        if (options.httpsOnly && details.url.startsWith('http:')) return callback({ cancel: true });
+        if (options.stripTracking && details.method === 'GET') {
+          const clean = stripTracking(details.url);
+          if (clean !== details.url) return callback({ redirectURL: clean });
+        }
+        return callback({});
+      }
+      if (!options.blocking || !this.engine) return callback({});
       const source = details.initiatorOrigin?.startsWith('http')
         ? details.initiatorOrigin
         : details.referrer || details.url;
@@ -98,10 +109,23 @@ class Privacy {
       callback({ cancel: blocked });
     });
     session.webRequest.onBeforeSendHeaders(filter, (details, callback) => {
-      if (!settings().doNotTrack) return callback({});
-      details.requestHeaders.DNT = '1';
-      details.requestHeaders['Sec-GPC'] = '1';
-      callback({ requestHeaders: details.requestHeaders });
+      const options = settings();
+      const headers = details.requestHeaders;
+      if (options.doNotTrack) {
+        removeHeaders(headers, 'dnt', 'sec-gpc');
+        headers.DNT = '1';
+        headers['Sec-GPC'] = '1';
+      }
+      if (options.thirdPartyCookies && thirdPartyResource(details, ownTab(details.webContentsId))) {
+        removeHeaders(headers, 'cookie', 'cookie2');
+      }
+      callback({ requestHeaders: headers });
+    });
+    session.webRequest.onHeadersReceived(filter, (details, callback) => {
+      if (!settings().thirdPartyCookies || !details.responseHeaders
+        || !thirdPartyResource(details, ownTab(details.webContentsId))) return callback({});
+      removeHeaders(details.responseHeaders, 'set-cookie', 'set-cookie2');
+      callback({ responseHeaders: details.responseHeaders });
     });
   }
 }

@@ -6,6 +6,7 @@ const address = $('address');
 const names = {
   bookmarks: 'Favoris',
   history: 'Historique',
+  home: 'Personnaliser l’accueil',
   downloads: 'Téléchargements',
   extensions: 'Extensions',
   reader: 'Mode lecture',
@@ -15,7 +16,15 @@ const names = {
 let state;
 let tabKey;
 let panelKey;
-let bookmarkKey;
+let homeKey;
+const engines = {
+  duckduckgo: 'DuckDuckGo', brave: 'Brave Search', bing: 'Bing', startpage: 'Startpage',
+  ecosia: 'Ecosia', qwant: 'Qwant', google: 'Google', firefox: 'Firefox',
+};
+const modules = {
+  quick: 'Accès rapides', favorites: 'Favoris', frequent: 'Sites les plus consultés',
+  recent: 'Pages récentes', shortcuts: 'Mes raccourcis',
+};
 let editing;
 let noticeTimer;
 let addressDirty = false;
@@ -83,7 +92,12 @@ function card(title) {
 
 function toolbar(next) {
   const active = next.active;
-  $('private-label').hidden = !next.privateMode;
+  const tor = $('private-label');
+  tor.hidden = !next.privateMode;
+  tor.textContent = next.torStatus === 'ready' ? 'Tor connecté' : next.torStatus === 'checking' ? 'Tor en cours…' : 'Vérifier Tor';
+  tor.disabled = next.torStatus !== 'offline';
+  tor.title = next.torMessage;
+  $('store-install').hidden = !next.storeListing;
   $('back').disabled = !active.back;
   $('forward').disabled = !active.forward;
   $('reload').disabled = !active.url;
@@ -170,70 +184,217 @@ function links(name, items) {
   return [list];
 }
 
-function settings(next) {
-  const options = card('Confidentialité et navigation');
-  const preferences = [
-    ['blocking', 'Bloquer les pubs et les pisteurs', `Filtrage des requêtes réseau · ${next.filterStatus}`],
-    ['doNotTrack', 'Demander aux sites de limiter le suivi', 'Envoie les signaux DNT et Global Privacy Control. Leur respect dépend du site.'],
-    ['httpsFirst', 'Préférer HTTPS dans la barre d’adresse', 'Appliqué aux adresses saisies sans protocole.'],
-    ['restoreTabs', 'Rouvrir les onglets au démarrage', 'Applicable à la fenêtre normale.'],
-    ['dark', 'Thème sombre', 'Appliqué à l’interface OpenWeb.'],
-  ];
-  for (const [key, label, description] of preferences) {
-    const checkbox = el('input');
-    checkbox.type = 'checkbox';
-    checkbox.checked = next.settings[key];
-    checkbox.addEventListener('change', async () => {
-      if (!await action('setting', { name: key, value: checkbox.checked })) checkbox.checked = !checkbox.checked;
-    });
-    options.append(row(label, description, [checkbox], 'label'));
-  }
+function settingCheckbox(next, key, label, description) {
+  const checkbox = el('input');
+  checkbox.type = 'checkbox';
+  checkbox.checked = next.settings[key];
+  checkbox.addEventListener('change', async () => {
+    if (!await action('setting', { name: key, value: checkbox.checked })) checkbox.checked = !checkbox.checked;
+  });
+  return row(label, description, [checkbox], 'label');
+}
 
+function engineChoice(next, key, privateMode) {
   const search = el('select');
-  for (const [value, label] of [['duckduckgo', 'DuckDuckGo'], ['qwant', 'Qwant'], ['google', 'Google']]) {
-    const option = el('option', '', label);
+  for (const [value, label] of Object.entries(engines)) {
+    if (privateMode && ['google', 'firefox'].includes(value)) continue;
+    const option = el('option', '', value === 'firefox' ? 'Firefox · moteur par défaut' : label);
     option.value = value;
     search.append(option);
   }
-  search.value = next.settings.search;
-  search.addEventListener('change', () => action('setting', { name: 'search', value: search.value }));
-  options.append(row('Moteur de recherche', '', [search], 'label'));
+  search.value = next.settings[key];
+  search.addEventListener('change', () => action('setting', { name: key, value: search.value }));
+  return search;
+}
 
-  const more = card('Outils');
+function settings(next) {
+  const search = card('Recherche et Tor');
+  search.append(row('Moteur de recherche', 'Firefox ouvre la recherche dans Firefox avec son moteur configuré.', [
+    engineChoice(next, 'search', false),
+  ], 'label'));
+  search.append(row('Moteur en navigation privée', 'La recherche passe par la connexion Tor vérifiée.', [
+    engineChoice(next, 'privateSearch', true),
+  ], 'label'));
+  const torForm = el('form', 'actions');
+  const port = el('input', 'port');
+  Object.assign(port, { type: 'number', min: '0', max: '65535', value: next.settings.torPort || '', placeholder: 'Auto' });
+  port.setAttribute('aria-label', 'Port SOCKS5 local ou automatique');
+  const savePort = el('button', 'quiet', 'Appliquer');
+  savePort.type = 'submit';
+  torForm.append(port, savePort);
+  torForm.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const value = port.value === '' ? 0 : Number(port.value);
+    if (value !== 0 && value < 1024) return notice('Choisis un port de 1024 à 65535 ou laisse le champ vide.');
+    void action('setting', { name: 'torPort', value });
+  });
+  search.append(row('Port SOCKS5 local', 'Auto essaie 9050, puis 9150. Ouvre une nouvelle fenêtre privée après modification.', [torForm]));
+
+  const protection = card('Confidentialité');
+  const preferences = [
+    ['blocking', 'Bloquer les pubs et les pisteurs', `Filtrage des requêtes réseau · ${next.filterStatus}`],
+    ['thirdPartyCookies', 'Filtrer les cookies tiers sur le réseau', 'Retire les en-têtes de cookies des requêtes et réponses des ressources tierces.'],
+    ['stripTracking', 'Nettoyer les liens de suivi', 'Retire les paramètres publicitaires courants des adresses visitées.'],
+    ['blockPings', 'Bloquer les pings de suivi', 'Bloque les notifications envoyées via les attributs de suivi des liens.'],
+    ['doNotTrack', 'Demander aux sites de limiter le suivi', 'Envoie les signaux DNT et Global Privacy Control.'],
+    ['httpsFirst', 'Préférer HTTPS à la saisie', 'Appliqué aux adresses saisies sans protocole.'],
+    ['httpsOnly', 'HTTPS uniquement', 'Bloque la navigation principale vers les adresses HTTP.'],
+  ];
+  protection.append(...preferences.map(([key, label, description]) => settingCheckbox(next, key, label, description)));
   const refresh = button('Actualiser', async () => {
     refresh.disabled = true;
     if (await action('filters:refresh')) notice('Listes de filtrage actualisées.');
     refresh.disabled = false;
   });
-  more.append(row('Listes de filtrage', 'EasyList et EasyPrivacy', [refresh]));
-  const zoom = (value) => action('zoom', { value });
-  more.append(row('Zoom de la page', `${Math.round(next.active.zoom * 100)} %`, [
-    button('− 10 %', () => zoom(-0.1)), button('100 %', () => zoom(0)), button('+ 10 %', () => zoom(0.1)),
-  ]));
-  more.append(row('Navigation', '', [
-    button('Historique', () => panel('history')),
-    button('Extensions', () => panel('extensions')),
-    button('Fenêtre privée', () => action('private')),
-  ]));
-  return [options, more];
+  protection.append(row('Listes de filtrage', 'EasyList et EasyPrivacy', [refresh]));
+
+  const navigation = card('Accueil et navigation');
+  navigation.append(
+    settingCheckbox(next, 'keepHistory', 'Conserver l’historique', 'Alimente les pages récentes et les sites les plus consultés.'),
+    settingCheckbox(next, 'restoreTabs', 'Rouvrir les onglets au démarrage', 'Applicable à la fenêtre normale.'),
+    settingCheckbox(next, 'dark', 'Thème sombre', 'Appliqué à l’interface OpenWeb.'),
+    row('Nouvel onglet', 'Active, réorganise et configure les modules.', [button('Personnaliser', () => panel('home'))]),
+    row('Zoom de la page', `${Math.round(next.active.zoom * 100)} %`, [
+      button('− 10 %', () => action('zoom', { value: -0.1 })),
+      button('100 %', () => action('zoom', { value: 0 })),
+      button('+ 10 %', () => action('zoom', { value: 0.1 })),
+    ]),
+  );
+
+  const data = card('Données et outils');
+  data.append(
+    row('Historique', '', [button('Afficher l’historique', () => panel('history'))]),
+    row('Données locales', '', [
+      button('Effacer le cache', () => action('privacy:clear', { kind: 'cache' })),
+      button('Effacer les données des sites', () => action('privacy:clear', { kind: 'sites' }), 'quiet danger'),
+    ]),
+    row('Navigation', '', [button('Extensions', () => panel('extensions')), button('Fenêtre privée', () => action('private'))]),
+  );
+  return [search, protection, navigation, data];
 }
 
 function extensions(next) {
+  const store = card('Chrome Web Store');
+  const form = el('form', 'store-form');
+  const link = field(form, 'Lien ou identifiant de l’extension', 'store', {
+    type: 'text', required: true, maxLength: 2048, placeholder: 'https://chromewebstore.google.com/detail/…', spellcheck: false,
+  });
+  const install = el('button', 'primary', 'Installer');
+  install.type = 'submit';
+  form.append(install);
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    install.disabled = true;
+    install.textContent = 'Vérification…';
+    await action('extensions:store', { value: link.value });
+    install.disabled = false;
+    install.textContent = 'Installer';
+  });
+  store.append(row('Parcourir le Chrome Web Store', 'Sur une fiche, utilise le bouton Installer de la barre OpenWeb.', [
+    button('Ouvrir le Store', () => action('extensions:store-page')),
+  ]), form);
   const tools = card();
-  tools.append(row('Importer une extension Chromium', 'Choisis le dossier décompressé qui contient manifest.json.', [
-    button('Choisir un dossier', () => action('extensions:add'), 'primary'),
+  tools.append(row('Importer un dossier', 'Choisis le dossier décompressé qui contient manifest.json.', [
+    button('Choisir un dossier', () => action('extensions:add')),
   ]));
   const list = card('Extensions installées');
   if (!next.extensions.length) list.append(el('p', 'empty', 'Aucune extension installée.'));
   for (const entry of next.extensions) {
     const controls = [];
     if (entry.page) controls.push(button('Ouvrir', () => action('extensions:open', { key: entry.key })));
+    if (entry.storeId) controls.push(button('Mettre à jour', async (event) => {
+      const update = event.currentTarget;
+      update.disabled = true;
+      if (await action('extensions:update', { key: entry.key })) notice('Vérification de mise à jour terminée.');
+      update.disabled = false;
+    }));
     controls.push(button(entry.enabled && !entry.error ? 'Désactiver' : 'Activer',
       () => action('extensions:set', { key: entry.key, value: !entry.enabled || Boolean(entry.error) })));
     controls.push(button('Supprimer', () => action('extensions:set', { key: entry.key, value: null }), 'quiet danger'));
-    list.append(row(entry.name, [entry.version, entry.error || (entry.enabled ? 'Activée' : 'Désactivée')].filter(Boolean).join(' · '), controls));
+    const source = entry.storeId ? 'Chrome Web Store' : 'Dossier local';
+    list.append(row(entry.name, [entry.version, source, entry.error || (entry.enabled ? 'Activée' : 'Désactivée')].join(' · '), controls));
   }
-  return [tools, list];
+  return [store, tools, list];
+}
+
+function editHome(next) {
+  const layout = card('Modules du nouvel onglet');
+  const active = next.homeModules;
+  const order = [...active, ...Object.keys(modules).filter((id) => !active.includes(id))];
+  for (const id of order) {
+    const position = active.indexOf(id);
+    const selected = position >= 0;
+    const checkbox = el('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = selected;
+    checkbox.setAttribute('aria-label', modules[id]);
+    checkbox.addEventListener('change', async () => {
+      if (!await action('home:module', { id, enabled: checkbox.checked })) checkbox.checked = selected;
+    });
+    const up = button('↑', () => action('home:module', { id, step: -1 }));
+    up.setAttribute('aria-label', `Remonter ${modules[id]}`);
+    up.disabled = position <= 0;
+    const down = button('↓', () => action('home:module', { id, step: 1 }));
+    down.setAttribute('aria-label', `Descendre ${modules[id]}`);
+    down.disabled = !selected || position >= active.length - 1;
+    layout.append(row(modules[id], '', [up, down, checkbox]));
+  }
+
+  const shortcuts = card('Mes raccourcis');
+  const form = el('form', 'store-form shortcut-form');
+  const title = field(form, 'Nom', 'title', { required: true, maxLength: 80 });
+  const url = field(form, 'Adresse HTTP ou HTTPS', 'url', { type: 'url', required: true, maxLength: 8192, placeholder: 'https://example.org' });
+  const submit = el('button', 'primary', 'Ajouter');
+  submit.type = 'submit';
+  form.append(submit);
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    submit.disabled = true;
+    if (await action('home:shortcut', { title: title.value, url: url.value })) form.reset();
+    submit.disabled = false;
+  });
+  shortcuts.append(form);
+  for (const item of next.shortcuts) {
+    shortcuts.append(row(item.title, item.url, [button('Retirer', () => action('home:shortcut', { id: item.id, remove: true }))]));
+  }
+  return [layout, shortcuts];
+}
+
+function homeModules(next) {
+  const signature = JSON.stringify([next.homeModules, next.bookmarks, next.frequent, next.recent, next.shortcuts]);
+  if (homeKey === signature) return;
+  homeKey = signature;
+  const region = $('home-modules');
+  region.replaceChildren();
+  const lists = { favorites: next.bookmarks, frequent: next.frequent, recent: next.recent, shortcuts: next.shortcuts };
+  for (const id of next.homeModules) {
+    if (id === 'quick') {
+      const quick = el('nav', 'quick');
+      quick.setAttribute('aria-label', 'Accès rapides');
+      quick.append(
+        button('☆  Favoris', () => panel('bookmarks')),
+        button('◷  Historique', () => panel('history')),
+        button('⊞  Extensions', () => panel('extensions')),
+        button('◐  Fenêtre privée', () => action('private')),
+      );
+      region.append(quick);
+      continue;
+    }
+    if (!lists[id]?.length) continue;
+    const shelf = el('section', 'home-shelf');
+    shelf.append(el('h2', '', modules[id]));
+    const grid = el('div', 'home-grid');
+    for (const item of lists[id]) {
+      const link = button('', () => action('navigate:link', { url: item.url }), 'home-tile');
+      const url = new URL(item.url);
+      link.title = item.url;
+      link.append(el('span', 'tile-title', item.title || url.hostname));
+      link.append(el('span', 'tile-meta', id === 'frequent' ? `${item.visits} visite${item.visits > 1 ? 's' : ''}` : url.hostname));
+      grid.append(link);
+    }
+    shelf.append(grid);
+    region.append(shelf);
+  }
 }
 
 function downloads(next) {
@@ -367,7 +528,7 @@ function drawPanel(next, force = false) {
   if (name !== 'vault') editing = null;
   const relevant = {
     bookmarks: next.bookmarks, history: next.history, downloads: next.downloads, extensions: next.extensions,
-    reader: next.reader, settings: [next.settings, next.filterStatus, next.active.zoom], vault: [next.vault, next.active.url],
+    home: [next.homeModules, next.shortcuts], reader: next.reader, settings: [next.settings, next.filterStatus, next.active.zoom], vault: [next.vault, next.active.url],
   };
   const signature = JSON.stringify([name, relevant[name]]);
   if (signature === panelKey && !force) return;
@@ -378,13 +539,12 @@ function drawPanel(next, force = false) {
   const head = el('header', 'panel-head');
   const title = el('div');
   title.append(el('h1', '', names[name]));
-  if (name === 'extensions') title.append(el('p', 'muted', 'Les extensions décompressées compatibles peuvent être installées ici.'));
   const close = button('Retour à l’onglet', () => panel(null));
   head.append(title, close);
   const contents = {
     bookmarks: () => links(name, next.bookmarks), history: () => links(name, next.history),
     downloads: () => downloads(next), extensions: () => extensions(next),
-    settings: () => settings(next), vault: () => vault(next), reader: () => reader(next),
+    settings: () => settings(next), vault: () => vault(next), reader: () => reader(next), home: () => editHome(next),
   };
   node.append(head, ...contents[name]());
 }
@@ -397,16 +557,18 @@ function render(next) {
   tabs(next);
   $('home').hidden = Boolean(next.panel || !next.active.home);
   $('home-title').textContent = next.privateMode ? 'Navigation privée' : 'OpenWeb';
+  const torPending = next.privateMode && next.torStatus !== 'ready';
   $('private-note').hidden = !next.privateMode;
+  $('private-note').textContent = next.torStatus === 'checking' ? 'Vérification de Tor en cours…'
+    : next.torMessage || 'Navigation et recherche via Tor.';
+  $('tor-retry').hidden = next.torStatus !== 'offline';
+  const query = $('query');
+  query.disabled = torPending;
+  $('home-search').querySelector('button').disabled = torPending;
+  query.placeholder = torPending ? 'Connexion Tor requise' : `Rechercher avec ${engines[next.searchChoice] || 'DuckDuckGo'}`;
   $('error-page').hidden = Boolean(next.panel || !next.active.error);
-  $('load-error').textContent = next.active.error || '';
-  const saved = next.active.home && !next.panel ? next.bookmarks.slice(0, 8) : [];
-  const signature = JSON.stringify(saved);
-  if (bookmarkKey !== signature) {
-    bookmarkKey = signature;
-    $('home-bookmarks').replaceChildren(...saved.map((item) =>
-      button(item.title || item.url, () => action('navigate:link', { url: item.url }))));
-  }
+  $('load-error').textContent = torPending ? next.torMessage : next.active.error || '';
+  homeModules(next);
   drawPanel(next);
   state = next;
 }
@@ -431,8 +593,18 @@ $('home-search').addEventListener('submit', (event) => {
 });
 for (const [id, name] of [
   ['new-tab', 'tab:new'], ['back', 'back'], ['forward', 'forward'], ['reload', 'reload'],
-  ['retry', 'reload'], ['bookmark-toggle', 'bookmark:toggle'], ['private-window', 'private'],
+  ['bookmark-toggle', 'bookmark:toggle'], ['tor-retry', 'tor:retry'], ['private-label', 'tor:retry'],
 ]) $(id).addEventListener('click', () => action(name));
+$('retry').addEventListener('click', async () => {
+  if (state?.torStatus === 'offline') await action('tor:retry');
+  if (!state?.privateMode || state.torStatus === 'ready') void action('reload');
+});
+$('store-install').addEventListener('click', async () => {
+  const install = $('store-install');
+  install.disabled = true;
+  await action('extensions:store');
+  install.disabled = false;
+});
 document.querySelectorAll('[data-panel]').forEach((node) => node.addEventListener('click', () => panel(node.dataset.panel)));
 api.onState(render);
 api.onNotice(notice);

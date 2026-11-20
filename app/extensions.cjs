@@ -2,6 +2,7 @@ const { createHash, randomUUID } = require('node:crypto');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { dialog } = require('electron');
+const { chromeId, stageStoreExtension, storeId } = require('./webstore.cjs');
 
 const MAX_TOTAL = 100 * 1024 * 1024;
 const MAX_FILES = 10_000;
@@ -37,6 +38,21 @@ async function readManifest(directory) {
   return manifest;
 }
 
+async function manifestName(directory, manifest) {
+  const match = /^__MSG_([a-z0-9_]+)__$/i.exec(manifest.name);
+  if (!match || typeof manifest.default_locale !== 'string' || !/^[a-z0-9_-]{1,30}$/i.test(manifest.default_locale)) return manifest.name;
+  const file = path.join(directory, '_locales', manifest.default_locale, 'messages.json');
+  try {
+    const info = await fs.stat(file);
+    if (info.size > 2 * 1024 * 1024) return manifest.name;
+    const messages = JSON.parse(await fs.readFile(file, 'utf8'));
+    const key = Object.keys(messages).find((name) => name.toLowerCase() === match[1].toLowerCase());
+    return typeof messages[key]?.message === 'string' ? messages[key].message : manifest.name;
+  } catch {
+    return manifest.name;
+  }
+}
+
 function extensionPage(extension, manifest) {
   const page = manifest.options_ui?.page ?? manifest.options_page
     ?? manifest.action?.default_popup ?? manifest.browser_action?.default_popup;
@@ -47,9 +63,10 @@ function extensionPage(extension, manifest) {
 }
 
 class Extensions {
-  constructor(session, profile, directory) {
+  constructor(session, profile, directory, storeFetch) {
     this.api = session.extensions;
     this.profile = profile;
+    this.storeFetch = storeFetch;
     this.root = path.join(directory, 'openweb-extensions');
     this.loaded = new Map();
     this.failures = new Map();
@@ -76,6 +93,12 @@ class Extensions {
     }));
   }
 
+  origins() {
+    const ids = [...this.loaded.values()].map(({ id }) => id)
+      .concat(this.profile.data.extensions.map(({ id }) => id).filter((id) => /^[a-p]{32}$/.test(id)));
+    return [...new Set(ids)].map((id) => `chrome-extension://${id}`);
+  }
+
   allows(url) {
     return [...this.loaded.values()].some(({ id }) => url.startsWith(`chrome-extension://${id}/`));
   }
@@ -85,8 +108,7 @@ class Extensions {
     const manifest = await readManifest(directory);
     if (typeof manifest.key === 'string') {
       // Chromium encodes the first 128 bits of the public key's SHA-256 using a–p.
-      const prefix = createHash('sha256').update(Buffer.from(manifest.key, 'base64')).digest('hex').slice(0, 32);
-      const id = [...prefix].map((digit) => String.fromCharCode(97 + parseInt(digit, 16))).join('');
+      const id = chromeId(createHash('sha256').update(Buffer.from(manifest.key, 'base64')).digest().subarray(0, 16));
       if ([...this.loaded.values()].some((active) => active.id === id)) {
         throw new Error('Une extension avec le même identifiant est déjà active.');
       }
@@ -103,7 +125,7 @@ class Extensions {
     }
     this.loaded.set(key, { id: extension.id, page });
     this.failures.delete(key);
-    return { name: extension.name, version: extension.version };
+    return { name: extension.name, version: extension.version, id: extension.id };
   }
 
   unload(key) {
@@ -117,16 +139,48 @@ class Extensions {
     const choice = await dialog.showOpenDialog(window, { title: 'Choisir une extension décompressée', properties: ['openDirectory'] });
     if (choice.canceled) return;
     const source = await fs.realpath(choice.filePaths[0]);
+    await this.install(window, async (target) => {
+      const relative = path.relative(source, target);
+      if (relative.split(path.sep)[0] !== '..' && !path.isAbsolute(relative)) {
+        throw new Error('Choisis un dossier extérieur au profil OpenWeb.');
+      }
+      await copyExtension(source, target);
+      return readManifest(target);
+    });
+  }
+
+  async addFromStore(window, input, updateKey) {
+    const id = storeId(input);
+    if (!id) throw new Error('Colle le lien d’une fiche du Chrome Web Store.');
+    const existing = this.profile.data.extensions.find((entry) => entry.storeId === id || entry.id === id);
+    if (updateKey ? existing?.key !== updateKey || existing?.storeId !== id : existing) {
+      throw new Error(updateKey ? 'Extension du Chrome Web Store introuvable.' : 'Cette extension est déjà installée.');
+    }
+    await this.install(window, async (target) => {
+      const verified = await stageStoreExtension(id, target, this.storeFetch, process.versions.chrome);
+      const manifest = await readManifest(target);
+      manifest.key = verified.key;
+      await fs.writeFile(path.join(target, 'manifest.json'), JSON.stringify(manifest), { mode: 0o600 });
+      return manifest;
+    }, id, existing);
+  }
+
+  async install(window, stage, store, previous) {
     const key = randomUUID();
     const target = path.join(this.root, key);
-    const relative = path.relative(source, target);
-    if (relative.split(path.sep)[0] !== '..' && !path.isAbsolute(relative)) {
-      throw new Error('Choisis un dossier extérieur au profil OpenWeb.');
-    }
     let saved = false;
+    let replaced = false;
     try {
-      await copyExtension(source, target);
-      const manifest = await readManifest(target);
+      const manifest = await stage(target);
+      const name = await manifestName(target, manifest);
+      if (previous) {
+        const old = String(previous.version).split('.').map(Number);
+        const next = manifest.version.split('.').map(Number);
+        const firstChange = [0, 1, 2, 3].find((index) => (next[index] ?? 0) !== (old[index] ?? 0));
+        if (firstChange === undefined || (next[firstChange] ?? 0) <= (old[firstChange] ?? 0)) {
+          throw new Error('Aucune version plus récente n’est disponible.');
+        }
+      }
       const permissions = [
         ...[manifest.permissions, manifest.host_permissions, manifest.optional_permissions, manifest.optional_host_permissions]
           .filter(Array.isArray).flat(),
@@ -134,23 +188,44 @@ class Extensions {
           .flatMap((item) => Array.isArray(item?.matches) ? item.matches : []),
       ].filter((value) => typeof value === 'string');
       const listed = [...new Set(permissions)].map((value) => value.slice(0, 200));
+      const verb = previous ? 'Mettre à jour' : 'Installer';
+      const sourceName = store ? 'Chrome Web Store · signature vérifiée' : 'Dossier local';
       const review = await dialog.showMessageBox(window, {
         type: 'warning',
-        title: 'Installer une extension',
-        message: `Installer « ${manifest.name.slice(0, 150)} » ?`,
-        detail: `Une extension peut lire ou modifier les pages auxquelles elle accède. Installe uniquement des extensions auxquelles tu fais confiance.\n\nAccès déclarés\n${listed.slice(0, 16).join(', ') || 'aucun'}${listed.length > 16 ? ` et ${listed.length - 16} autres` : ''}.`,
-        buttons: ['Annuler', 'Installer'],
+        title: `${verb} une extension`,
+        message: `${verb} « ${name.slice(0, 150)} » ?`,
+        detail: `${sourceName} · Version ${manifest.version}\nUne extension peut lire ou modifier les pages auxquelles elle accède.\n\nAccès déclarés\n${listed.slice(0, 16).join(', ') || 'aucun'}${listed.length > 16 ? ` et ${listed.length - 16} autres` : ''}.`,
+        buttons: ['Annuler', verb],
         defaultId: 0,
         cancelId: 0,
       });
       if (review.response !== 1) return;
-      const identity = await this.load(key);
-      this.profile.commit({ extensions: [...this.profile.data.extensions, { key, ...identity, enabled: true }] });
+      if (previous && this.loaded.has(previous.key)) {
+        this.unload(previous.key);
+        replaced = true;
+      }
+      const enabled = previous?.enabled ?? true;
+      const identity = enabled ? await this.load(key) : { id: store, name, version: manifest.version };
+      if (store && identity.id !== store) throw new Error('L’identifiant chargé ne correspond pas à la fiche du Chrome Web Store.');
+      const entry = { key, ...identity, enabled, ...(store ? { storeId: store } : {}) };
+      this.profile.commit({
+        extensions: previous
+          ? this.profile.data.extensions.map((item) => item === previous ? entry : item)
+          : [...this.profile.data.extensions, entry],
+      });
       saved = true;
+      if (previous) await fs.rm(path.join(this.root, previous.key), { recursive: true, force: true }).catch(() => {});
     } finally {
       if (!saved) {
         this.unload(key);
         await fs.rm(target, { recursive: true, force: true }).catch(() => {});
+        if (replaced) {
+          try {
+            await this.load(previous.key);
+          } catch {
+            this.failures.set(previous.key, 'Chromium n’a pas pu recharger cette extension.');
+          }
+        }
       }
     }
   }

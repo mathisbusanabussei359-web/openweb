@@ -13,7 +13,7 @@ const output = await packager({
   overwrite: true,
   download: { checksums: require('electron/checksums.json') },
   asar: { unpack: '**/*.node' },
-  ignore: /^\/(?:\.git(?:hub)?|dist|native|scripts|tests|node_modules)(?:\/|$)/,
+  ignore: /^\/(?:\.git(?:hub)?|dist|native|scripts|tests)(?:\/|$)/,
 });
 if (process.platform === 'linux') {
   for (const directory of output) {

@@ -6,10 +6,14 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const native = require('./openweb-native.node');
-const { Profile, preference } = require('./profile.cjs');
+const { Profile, preference, HOME_MODULES } = require('./profile.cjs');
 const { Privacy } = require('./privacy.cjs');
 const { Extensions } = require('./extensions.cjs');
 const { Vault } = require('./vault.cjs');
+const { connectTor } = require('./tor.cjs');
+const { STORE, storeId } = require('./webstore.cjs');
+const { openFirefox } = require('./firefox.cjs');
+const { stripTracking } = require('./privacy-rules.cjs');
 const { address, webUrl, isolated, fillLogin, extractArticle } = require('./navigation.cjs');
 
 const CHROME_HEIGHT = 106;
@@ -27,6 +31,7 @@ const webPreferences = {
   allowRunningInsecureContent: false,
   navigateOnDragDrop: false,
   devTools: false,
+  spellcheck: false,
 };
 
 let profile;
@@ -37,7 +42,17 @@ let vault;
 let regular;
 
 app.enableSandbox();
-app.commandLine.appendSwitch('site-per-process');
+for (const flag of [
+  'site-per-process', 'disable-background-networking', 'disable-sync', 'disable-domain-reliability',
+  'disable-breakpad', 'disable-quic', 'disable-preconnect', 'dns-prefetch-disable',
+]) app.commandLine.appendSwitch(flag);
+app.commandLine.appendSwitch('force-webrtc-ip-handling-policy', 'disable_non_proxied_udp');
+app.commandLine.appendSwitch('disable-features',
+  'OptimizationHints,MediaRouter,AutofillServerCommunication,NetworkTimeServiceQuerying,UseDnsHttpsSvcb');
+app.on('session-created', (context) => {
+  context.setSpellCheckerEnabled(false);
+  if (process.platform !== 'darwin') context.setSpellCheckerLanguages([]);
+});
 
 function mainFrameGuard(target, event) {
   const url = event.url;
@@ -72,7 +87,7 @@ class Tab {
   }
 
   start() {
-    if (this.view || !this.pending) return;
+    if (this.view || !this.pending || !this.browser.canBrowse()) return;
     this.createView();
     this.load(this.pending);
   }
@@ -81,11 +96,15 @@ class Tab {
     const tab = this;
     this.view = new WebContentsView({ webPreferences: { ...webPreferences, session: this.browser.session } });
     const contents = this.view.webContents;
+    contents.setWebRTCIPHandlingPolicy('disable_non_proxied_udp');
     const contentsId = contents.id;
     guests.set(contentsId, this);
     contents.once('destroyed', () => guests.delete(contentsId));
     contents.on('will-frame-navigate', (event) => mainFrameGuard(this, event));
-    contents.on('will-redirect', (event) => mainFrameGuard(this, event));
+    contents.on('will-redirect', (event) => {
+      mainFrameGuard(this, event);
+      if (event.isMainFrame && webUrl(event.url)) this.pending = event.url;
+    });
     contents.on('will-attach-webview', (event) => event.preventDefault());
     contents.setWindowOpenHandler(({ url, disposition, postBody }) => {
       if (webUrl(url) && !postBody && ['foreground-tab', 'background-tab', 'new-window'].includes(disposition)
@@ -122,7 +141,7 @@ class Tab {
     });
     contents.on('page-title-updated', (_event, title) => {
       this.title = title.slice(0, 240);
-      this.browser.visit(this);
+      this.browser.visit(this, false);
       this.browser.publish();
     });
     contents.on('did-fail-load', (_event, code, reason, url, isMainFrame) => {
@@ -146,6 +165,7 @@ class Tab {
   }
 
   load(url) {
+    if (!this.browser.canBrowse()) return;
     if (!webUrl(url) && !(this.extension && url.startsWith(this.extension) && extensions.allows(url))) return;
     if (!this.view) this.createView();
     this.pending = url;
@@ -164,12 +184,13 @@ class Tab {
     this.url = url;
     this.pending = '';
     this.error = '';
-    this.browser.visit(this);
+    this.browser.visit(this, true);
     this.browser.saveSoon();
     this.browser.render();
   }
 
   reload() {
+    this.browser.requireConnection();
     const url = this.pending || this.url;
     if (!url) return;
     if (this.error || !this.view) this.load(url);
@@ -177,6 +198,10 @@ class Tab {
   }
 
   fail(reason) {
+    if (this.browser.privateMode && /^ERR_(?:SOCKS|PROXY|TUNNEL)_/.test(reason)) {
+      this.browser.torStatus = 'offline';
+      this.browser.torMessage = 'Connexion Tor interrompue. Vérifie Tor, puis réessaie.';
+    }
     this.error = reason;
     this.loading = false;
     this.browser.render();
@@ -218,6 +243,9 @@ class Browser {
   constructor(privateMode = false) {
     this.privateMode = privateMode;
     this.session = privateMode ? session.fromPartition(`private:${randomUUID()}`) : persistent;
+    this.torStatus = privateMode ? 'checking' : null;
+    this.torMessage = '';
+    this.torPort = profile.data.settings.torPort;
     if (privateMode) setupSession(this.session);
     this.tabs = [];
     this.closedTabs = [];
@@ -244,7 +272,8 @@ class Browser {
     });
 
     const chrome = this.window.webContents;
-    browsers.set(chrome.id, this);
+    const chromeId = chrome.id;
+    browsers.set(chromeId, this);
     const deny = (event) => event.preventDefault();
     for (const event of ['will-frame-navigate', 'will-redirect', 'will-attach-webview']) chrome.on(event, deny);
     chrome.setWindowOpenHandler(() => ({ action: 'deny' }));
@@ -258,16 +287,52 @@ class Browser {
       this.closed = true;
       clearTimeout(this.publishTimer);
       for (const tab of this.tabs) tab.close();
-      browsers.delete(chrome.id);
+      browsers.delete(chromeId);
       if (this.privateMode) void this.session.clearData().catch(() => {});
       else regular = null;
     });
 
     const saved = privateMode || !profile.data.settings.restoreTabs ? [] : profile.data.tabs;
     this.tabs = (saved.length ? saved : ['']).map((url) => new Tab(this, url));
-    this.active = this.tabs[Math.min(Math.max(Number(profile.data.activeIndex) || 0, 0), this.tabs.length - 1)];
+    const selected = Number.isInteger(profile.data.activeIndex) ? profile.data.activeIndex : 0;
+    this.active = this.tabs[Math.min(Math.max(selected, 0), this.tabs.length - 1)];
     this.active.start();
     void this.window.loadFile(HOME);
+    if (privateMode) void this.checkTor();
+  }
+
+  canBrowse() {
+    return !this.privateMode || this.torStatus === 'ready';
+  }
+
+  requireConnection() {
+    if (!this.canBrowse()) throw new Error('La navigation privée attend une connexion Tor vérifiée.');
+  }
+
+  async checkTor() {
+    if (this.checkingTor || this.torStatus === 'ready') return;
+    this.checkingTor = true;
+    this.torStatus = 'checking';
+    this.torMessage = '';
+    this.publish();
+    try {
+      const ports = this.torPort ? [this.torPort] : [9050, 9150];
+      for (const port of ports) {
+        try {
+          await connectTor(this.session, port);
+          this.torStatus = 'ready';
+          this.torMessage = `Connexion Tor vérifiée · port ${port}`;
+          return;
+        } catch (error) {
+          this.torMessage = error.message;
+        }
+      }
+      this.torStatus = 'offline';
+      if (!this.torPort) this.torMessage = 'Démarre Tor ou le Navigateur Tor sur le port 9050 ou 9150.';
+    } finally {
+      this.checkingTor = false;
+      this.publish();
+    }
   }
 
   newTab(url = '', activate = true) {
@@ -325,7 +390,7 @@ class Browser {
   render() {
     if (this.closed || this.window.isDestroyed()) return;
     const tab = this.active;
-    const next = !this.panel && tab?.url && !tab.error ? tab.view : null;
+    const next = this.canBrowse() && !this.panel && tab?.url && !tab.error ? tab.view : null;
     if (next !== this.attached) {
       this.detach();
       if (next) {
@@ -353,15 +418,25 @@ class Browser {
 
   state() {
     const current = this.active?.summary();
-    const list = this.panel === 'bookmarks' || (current?.home && !this.panel);
+    const home = !this.privateMode && current?.home && !this.panel;
+    const homeEdit = this.panel === 'home';
+    const display = profile.data.homeModules;
     return {
       privateMode: this.privateMode,
+      torStatus: this.torStatus,
+      torMessage: this.torMessage,
+      searchChoice: this.privateMode ? profile.data.settings.privateSearch : profile.data.settings.search,
+      homeModules: home || homeEdit ? display : [],
+      shortcuts: homeEdit ? profile.data.shortcuts : home && display.includes('shortcuts') ? profile.data.shortcuts.slice(0, 8) : [],
+      frequent: home && display.includes('frequent') ? this.frequent() : [],
+      recent: home && display.includes('recent') ? this.history.slice(0, 6) : [],
+      storeListing: this.privateMode || !current?.committed ? null : storeId(current.url),
       tabs: this.tabs.map((tab) => tab.summary()),
       active: current,
       panel: this.panel,
       dark: profile.data.settings.dark,
-      marked: profile.data.bookmarks.some((entry) => entry.url === this.active?.url),
-      bookmarks: list && !this.privateMode ? profile.data.bookmarks : [],
+      marked: !this.privateMode && profile.data.bookmarks.some((entry) => entry.url === this.active?.url),
+      bookmarks: this.panel === 'bookmarks' ? profile.data.bookmarks : home && display.includes('favorites') ? profile.data.bookmarks.slice(0, 8) : [],
       history: this.panel === 'history' ? this.history : [],
       settings: this.panel === 'settings' ? profile.data.settings : null,
       filterStatus: privacy.status,
@@ -373,15 +448,28 @@ class Browser {
     };
   }
 
-  visit(tab) {
-    if (this.privateMode || !webUrl(tab.url) || tab.url.length > 8192 || tab.error) return;
+  visit(tab, counted) {
+    const url = webUrl(tab.url);
+    if (this.privateMode || !profile.data.settings.keepHistory || !url || tab.url.length > 8192 || tab.error) return;
     const previous = this.history.find((entry) => entry.url === tab.url);
-    this.history = [{
-      url: tab.url,
-      title: tab.title || previous?.title || new URL(tab.url).hostname,
-      date: Date.now(),
-    }, ...this.history.filter((entry) => entry.url !== tab.url)].slice(0, 300);
+    if (counted) {
+      this.history = [{
+        url: tab.url, title: previous?.title || url.hostname, date: Date.now(), visits: (previous?.visits ?? 0) + 1,
+      }, ...this.history.filter((entry) => entry !== previous)].slice(0, 300);
+    } else if (previous && tab.title) previous.title = tab.title;
     this.saveSoon();
+  }
+
+  frequent() {
+    const sites = new Map();
+    for (const entry of this.history) {
+      const url = webUrl(entry.url);
+      if (!url) continue;
+      const item = sites.get(url.origin) ?? { title: url.hostname, url: url.origin + '/', visits: 0 };
+      item.visits += entry.visits ?? 1;
+      sites.set(url.origin, item);
+    }
+    return [...sites.values()].sort((a, b) => b.visits - a.visits).slice(0, 6);
   }
 
   saveSoon() {
@@ -440,6 +528,11 @@ class Browser {
   }
 
   navigate(url) {
+    this.requireConnection();
+    if (profile.data.settings.httpsOnly && url.startsWith('http:')) {
+      throw new Error('Le mode HTTPS uniquement bloque cette adresse.');
+    }
+    if (profile.data.settings.stripTracking) url = stripTracking(url);
     this.panel = null;
     this.reader = null;
     if (this.active.extension) this.newTab(url);
@@ -447,6 +540,7 @@ class Browser {
   }
 
   moveHistory(offset) {
+    this.requireConnection();
     const navigation = this.active.view?.webContents.navigationHistory;
     if (!navigation?.canGoToOffset(offset)) return;
     this.panel = null;
@@ -509,7 +603,14 @@ class Browser {
       case 'tab:new': this.newTab(); this.focusAddress(); break;
       case 'tab:select': this.select(input.id); break;
       case 'tab:close': this.closeTab(input.id); break;
-      case 'navigate': this.navigate(address(input.value, profile.data.settings)); break;
+      case 'navigate': {
+        this.requireConnection();
+        const options = profile.data.settings;
+        const target = address(input.value, this.privateMode ? { ...options, search: options.privateSearch } : options);
+        if (typeof target === 'string') this.navigate(target);
+        else await openFirefox(target.firefoxQuery);
+        break;
+      }
       case 'navigate:link': {
         const url = webUrl(input.url);
         if (!url) throw new Error('Adresse invalide.');
@@ -520,8 +621,11 @@ class Browser {
       case 'forward': this.moveHistory(1); break;
       case 'reload': if (tab.loading) contents?.stop(); else tab.reload(); break;
       case 'private': new Browser(true); break;
+      case 'tor:retry':
+        if (this.privateMode) await this.checkTor();
+        break;
       case 'panel': {
-        const valid = ['settings', 'bookmarks', 'history', 'vault', 'extensions', ...allowPrivate];
+        const valid = ['settings', 'bookmarks', 'history', 'vault', 'extensions', 'home', ...allowPrivate];
         if (input.name !== null && (!valid.includes(input.name) || (this.privateMode && !allowPrivate.includes(input.name)))) {
           throw new Error('Cette page est indisponible dans cette fenêtre.');
         }
@@ -567,6 +671,51 @@ class Browser {
         for (const browser of browsers.values()) browser.publish();
         break;
       }
+      case 'home:module': {
+        if (this.privateMode || this.panel !== 'home' || !HOME_MODULES.includes(input.id)) break;
+        const modules = [...profile.data.homeModules];
+        const index = modules.indexOf(input.id);
+        if (input.enabled === true && index < 0) modules.push(input.id);
+        else if (input.enabled === false && index >= 0) modules.splice(index, 1);
+        else if ([-1, 1].includes(input.step) && index >= 0 && modules[index + input.step]) {
+          [modules[index], modules[index + input.step]] = [modules[index + input.step], modules[index]];
+        }
+        profile.commit({ homeModules: modules });
+        break;
+      }
+      case 'home:shortcut': {
+        if (this.privateMode || this.panel !== 'home') break;
+        const old = profile.data.shortcuts;
+        if (input.remove === true) {
+          profile.commit({ shortcuts: old.filter((item) => item.id !== input.id) });
+          break;
+        }
+        const url = webUrl(input.url);
+        const title = typeof input.title === 'string' ? input.title.trim() : '';
+        if (!url || url.href.length > 8192 || !title || title.length > 80) throw new Error('Saisis un nom et une adresse HTTP ou HTTPS.');
+        if (old.length >= 30) throw new Error('La limite de 30 raccourcis est atteinte.');
+        profile.commit({ shortcuts: [...old, { id: randomUUID(), title, url: url.href }] });
+        break;
+      }
+      case 'privacy:clear': {
+        if (this.privateMode || this.panel !== 'settings' || !['cache', 'sites'].includes(input.kind)) break;
+        if (input.kind === 'cache') await persistent.clearCache();
+        else {
+          const answer = await dialog.showMessageBox(this.window, {
+            type: 'warning', message: 'Effacer les cookies et les données des sites ?',
+            detail: 'Les sites pourront te demander de te reconnecter.',
+            buttons: ['Annuler', 'Effacer'], defaultId: 0, cancelId: 0,
+          });
+          if (answer.response !== 1) break;
+          const excludeOrigins = extensions.origins();
+          await persistent.clearData({
+            dataTypes: ['cookies', 'localStorage', 'indexedDB', 'serviceWorkers', 'fileSystems', 'cache'],
+            ...(excludeOrigins.length ? { excludeOrigins } : {}),
+          });
+        }
+        this.notify('Les données sélectionnées ont été effacées.');
+        break;
+      }
       case 'filters:refresh':
         if (!this.privateMode && this.panel === 'settings') await privacy.refresh();
         break;
@@ -578,6 +727,24 @@ class Browser {
         if (record?.path) shell.showItemInFolder(record.path);
         break;
       }
+      case 'extensions:store-page':
+        if (!this.privateMode) this.newTab(STORE);
+        break;
+      case 'extensions:store': {
+        const activeId = storeId(tab.url);
+        if (!this.privateMode && (this.panel === 'extensions' || (tab.summary().committed && activeId))) {
+          const lookup = this.panel === 'extensions' ? input.value : activeId;
+          await extensions.run(() => extensions.addFromStore(this.window, lookup));
+          this.panel = 'extensions';
+        }
+        break;
+      }
+      case 'extensions:update':
+        if (!this.privateMode && this.panel === 'extensions') {
+          const entry = extensions.list().find(({ key }) => key === input.key && Boolean(input.key));
+          if (entry?.storeId) await extensions.run(() => extensions.addFromStore(this.window, entry.storeId, entry.key));
+        }
+        break;
       case 'extensions:add':
         if (!this.privateMode && this.panel === 'extensions') await extensions.run(() => extensions.add(this.window));
         break;
@@ -652,7 +819,8 @@ async function start() {
   });
   persistent = session.fromPartition('persist:openweb-web');
   setupSession(persistent);
-  extensions = new Extensions(persistent, profile, directory);
+  const storeSession = session.fromPartition('openweb-store-downloads');
+  extensions = new Extensions(persistent, profile, directory, (url, options) => storeSession.fetch(url, options));
   vault = new Vault(native, directory, () => regular?.publish());
   powerMonitor.on('suspend', () => vault.lock());
   powerMonitor.on('lock-screen', () => vault.lock());

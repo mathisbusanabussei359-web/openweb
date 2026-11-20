@@ -14,7 +14,7 @@
       <span class="mini-mark" aria-hidden="true"></span>
       <div id="tabs" class="tabs" role="tablist" aria-label="Onglets"></div>
       <button class="icon new-tab" id="new-tab" type="button" aria-label="Nouvel onglet" title="Nouvel onglet">+</button>
-      <span id="private-label" class="private-label" hidden>Privé</span>
+      <button id="private-label" class="private-label quiet" type="button" hidden>Tor</button>
     </div>
     <nav class="toolbar" aria-label="Commandes du navigateur">
       <div class="nav-cluster">
@@ -28,6 +28,7 @@
         <button class="icon star regular-only" id="bookmark-toggle" type="button" aria-label="Ajouter aux favoris" title="Ajouter aux favoris">☆</button>
       </form>
       <div class="tools">
+        <button class="secondary store-install" id="store-install" type="button" title="Installer depuis le Chrome Web Store" hidden>Installer</button>
         <button class="icon shield" id="shield" type="button" data-panel="settings" title="Réglages de confidentialité" aria-label="Réglages de confidentialité"><span class="shield-icon" aria-hidden="true">✓</span><span id="blocked" aria-hidden="true" hidden></span></button>
         <button class="icon" type="button" data-panel="reader" title="Mode lecture" aria-label="Mode lecture"><span class="reader-icon" aria-hidden="true">≡</span></button>
         <button class="icon regular-only" type="button" data-panel="bookmarks" title="Favoris" aria-label="Favoris">☆</button>
@@ -42,19 +43,15 @@
       <div class="home-inner">
         <span class="hero-mark" aria-hidden="true"></span>
         <h1 id="home-title">OpenWeb</h1>
-        <p id="private-note" class="muted" hidden>Les cookies et l’historique de cette fenêtre sont effacés à sa fermeture.</p>
+        <p id="private-note" class="muted" role="status" hidden></p>
+        <button class="secondary" id="tor-retry" type="button" hidden>Vérifier Tor</button>
         <form id="home-search" class="home-search" autocomplete="off">
           <span class="search-icon" aria-hidden="true"></span>
           <input type="text" id="query" aria-label="Rechercher sur le Web ou saisir une adresse" placeholder="Rechercher sur le Web" spellcheck="false">
           <button type="submit" aria-label="Lancer la recherche" title="Lancer la recherche">→</button>
         </form>
-        <nav class="quick regular-only" aria-label="Accès rapides">
-          <button type="button" data-panel="bookmarks"><span aria-hidden="true">☆</span>Favoris</button>
-          <button type="button" data-panel="history"><span aria-hidden="true">◷</span>Historique</button>
-          <button type="button" data-panel="extensions"><span aria-hidden="true">⊞</span>Extensions</button>
-          <button type="button" id="private-window"><span aria-hidden="true">◐</span>Fenêtre privée</button>
-        </nav>
-        <div id="home-bookmarks" class="home-bookmarks"></div>
+        <div id="home-modules" class="home-modules regular-only"></div>
+        <button class="quiet regular-only" id="home-edit" type="button" data-panel="home">Personnaliser l’accueil</button>
       </div>
     </section>
     <section id="error-page" class="error-page" hidden>

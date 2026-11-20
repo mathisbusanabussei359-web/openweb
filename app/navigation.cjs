@@ -2,6 +2,10 @@ const SEARCH = {
   duckduckgo: 'https://duckduckgo.com/?q=',
   qwant: 'https://www.qwant.com/?q=',
   google: 'https://www.google.com/search?q=',
+  brave: 'https://search.brave.com/search?q=',
+  bing: 'https://www.bing.com/search?q=',
+  startpage: 'https://www.startpage.com/sp/search?query=',
+  ecosia: 'https://www.ecosia.org/search?q=',
 };
 
 function webUrl(value) {
@@ -31,6 +35,7 @@ function address(input, options) {
     const url = webUrl(`${options.httpsFirst ? 'https' : 'http'}://${value}`);
     if (url) return url.href;
   }
+  if (options.search === 'firefox') return { firefoxQuery: value };
   return (SEARCH[options.search] ?? SEARCH.duckduckgo) + encodeURIComponent(value);
 }
 
@@ -90,4 +95,4 @@ function extractArticle(origin) {
   return { title: document.title.slice(0, 200), blocks };
 }
 
-module.exports = { address, webUrl, loginOrigin, isolated, fillLogin, extractArticle };
+module.exports = { SEARCH, address, webUrl, loginOrigin, isolated, fillLogin, extractArticle };

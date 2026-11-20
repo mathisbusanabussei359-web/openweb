@@ -1,7 +1,7 @@
 {
   "name": "openweb",
   "productName": "OpenWeb",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "description": "Navigateur Chromium avec filtrage réseau et coffre local en Rust.",
   "main": "app/main.cjs",
@@ -18,5 +18,9 @@
   },
   "engines": {
     "node": ">=22.12"
+  },
+  "dependencies": {
+    "tldts": "7.5.5",
+    "yauzl": "3.4.0"
   }
 }

@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const https = require('node:https');
+const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const { setTimeout: delay } = require('node:timers/promises');
@@ -37,7 +38,14 @@ const { X509Certificate } = require('node:crypto');
 const fingerprint = new X509Certificate(certificate).fingerprint256;
 let requestHeaders;
 let adRequests = 0;
+let torAnswer = false;
+const proxiedPorts = new Set();
+let privateTrafficWasProxied = false;
 const server = https.createServer({ key: fs.readFileSync(key), cert: certificate }, (request, response) => {
+  if (request.url === '/private-record') privateTrafficWasProxied = proxiedPorts.has(request.socket.remotePort);
+  if (request.url === '/tor-check') {
+    return response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ IsTor: torAnswer }));
+  }
   if (request.url.startsWith('/openweb-test-ad.png')) {
     adRequests += 1;
     return response.writeHead(200).end('fixture');
@@ -67,6 +75,43 @@ app.on('certificate-error', (event, _contents, url, _error, certDetails, callbac
   }
 });
 
+// Exercise Chromium's real SOCKS connection with a local test proxy only.
+const socks = net.createServer((socket) => {
+  socket.on('error', () => {});
+  socket.once('data', (greeting) => {
+    if (greeting[0] !== 5) return socket.destroy();
+    socket.write(Buffer.from([5, 0]));
+    socket.once('data', (request) => {
+      const offset = request[3] === 1 ? 8 : request[3] === 3 ? 5 + request[4] : 0;
+      if (request[1] !== 1 || !offset || request.length < offset + 2 || request.readUInt16BE(offset) !== server.address().port) {
+        return socket.end(Buffer.from([5, 1, 0, 1, 0, 0, 0, 0, 0, 0]));
+      }
+      const upstream = net.connect(server.address().port, '127.0.0.1');
+      upstream.on('error', () => socket.destroy());
+      socket.once('close', () => upstream.destroy());
+      upstream.once('connect', () => {
+        proxiedPorts.add(upstream.localPort);
+        socket.write(Buffer.from([5, 0, 0, 1, 127, 0, 0, 1, 0, 0]));
+        socket.pipe(upstream).pipe(socket);
+      });
+    });
+  });
+});
+const tor = require('../app/tor.cjs');
+const realTor = tor.connectTor;
+tor.connectTor = async (context, port) => {
+  context.setCertificateVerifyProc((request, callback) => {
+    const valid = request.hostname === '127.0.0.1'
+      && new X509Certificate(request.certificate.data).fingerprint256 === fingerprint;
+    callback(valid ? 0 : -3);
+  });
+  return realTor({
+    setProxy: (options) => context.setProxy(options),
+    closeAllConnections: () => context.closeAllConnections(),
+    resolveProxy: (url) => context.resolveProxy(url),
+    fetch: (_url, options) => context.fetch(`https://127.0.0.1:${server.address().port}/tor-check`, options),
+  }, port);
+};
 require('../app/main.cjs');
 
 async function waitFor(check, label) {
@@ -104,6 +149,10 @@ async function run() {
     new Promise((resolve, reject) => {
       server.once('error', reject);
       server.listen(0, '0.0.0.0', resolve);
+    }),
+    new Promise((resolve, reject) => {
+      socks.once('error', reject);
+      socks.listen(0, '127.0.0.1', resolve);
     }),
   ]);
   const address = `https://127.0.0.1:${server.address().port}`;
@@ -193,19 +242,45 @@ async function run() {
   await command(window, 'panel', { name: 'extensions' });
   await command(window, 'extensions:set', { key: installed.extensions[0].key, value: true });
 
+  await command(window, 'panel', { name: 'settings' });
+  await command(window, 'setting', { name: 'torPort', value: socks.address().port });
+  await command(window, 'setting', { name: 'privateSearch', value: 'brave' });
   await command(window, 'private');
   const privateWindow = await waitFor(() => BrowserWindow.getAllWindows().find((candidate) =>
     candidate !== window && candidate.webContents.getURL().endsWith('/ui/index.html')
     && !candidate.webContents.isLoading()), 'private window');
-  assert.equal((await command(privateWindow, 'state')).privateMode, true);
+  const initial = await command(privateWindow, 'state');
+  assert.equal(initial.privateMode, true);
+  assert.equal(initial.searchChoice, 'brave');
+  await waitFor(async () => (await command(privateWindow, 'state')).torStatus === 'offline', 'Tor verification failure');
+  assert.match((await execute(privateWindow, 'navigate', { value: address + '/unsent' })).error, /Tor vérifiée/);
+  assert.equal(guest(privateWindow), undefined);
+  torAnswer = true;
+  const ready = await command(privateWindow, 'tor:retry');
+  assert.equal(ready.torStatus, 'ready', ready.torMessage);
   const privatePage = await navigate(privateWindow, address + '/private-record');
+  assert.equal(privateTrafficWasProxied, true);
   assert.equal(await privatePage.executeJavaScript('document.cookie'), '');
   assert.equal(await privatePage.executeJavaScript('document.documentElement.dataset.openwebExtension'), undefined);
   assert.match((await execute(privateWindow, 'panel', { name: 'vault' })).error, /indisponible/);
   privateWindow.close();
   const history = await command(window, 'panel', { name: 'history' });
   assert.ok(history.history.some(({ url }) => url === address + '/disabled'));
-  assert.equal(history.history.some(({ url }) => url.includes('private-record')), false);
+  assert.equal(history.history.some(({ url }) => /private-record|unsent/.test(url)), false);
+  await command(window, 'navigate', { value: address + '/clean?utm_source=test&q=1' });
+  await waitFor(async () => (await command(window, 'state')).active.url === address + '/clean?q=1', 'cleaned tracking link');
+
+  const homeTab = await command(window, 'tab:new');
+  assert.ok(homeTab.frequent.some(({ url, visits }) => url === address + '/' && visits >= 2));
+  await command(window, 'panel', { name: 'home' });
+  await command(window, 'home:module', { id: 'quick', enabled: false });
+  await command(window, 'home:module', { id: 'shortcuts', step: -1 });
+  await command(window, 'home:shortcut', { title: 'Mon test', url: address + '/' });
+  const customized = await command(window, 'panel', { name: null });
+  assert.equal(customized.homeModules.includes('quick'), false);
+  assert.equal(customized.shortcuts[0].title, 'Mon test');
+  assert.equal(await ui(window, 'document.querySelector("#home-modules").textContent.includes("Mon test")'), true);
+  await command(window, 'tab:close', { id: homeTab.active.id });
 
   const { tabs } = await command(window, 'tab:new');
   assert.equal(tabs.length, 2);
@@ -214,13 +289,14 @@ async function run() {
   const installedList = await command(window, 'panel', { name: 'extensions' });
   await command(window, 'extensions:set', { key: installedList.extensions[0].key, value: null });
   assert.equal(session.fromPartition('persist:openweb-web').extensions.getAllExtensions().length, 0);
-  console.log('Desktop smoke test passed: navigation, filters, favorites, reader, vault, downloads, extensions and private browsing.');
+  console.log('Desktop smoke test passed: navigation, filters, home modules, vault, extensions, and fail-closed SOCKS routing.');
 }
 
 function finish(error) {
   if (error) console.error(error);
   app.once('will-quit', () => {
     server.close();
+    socks.close();
     fs.rmSync(root, { recursive: true, force: true });
     app.exit(error ? 1 : 0);
   });

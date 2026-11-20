@@ -1,7 +1,10 @@
 const { randomUUID } = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
-const { webUrl } = require('./navigation.cjs');
+const { SEARCH, webUrl } = require('./navigation.cjs');
+
+const HOME_MODULES = ['quick', 'favorites', 'frequent', 'recent', 'shortcuts'];
+const PRIVATE_SEARCH = ['duckduckgo', 'brave', 'startpage', 'qwant', 'bing', 'ecosia'];
 
 const DEFAULTS = {
   blocking: true,
@@ -10,18 +13,30 @@ const DEFAULTS = {
   restoreTabs: true,
   dark: false,
   search: 'duckduckgo',
+  privateSearch: 'duckduckgo',
+  torPort: 0,
+  blockPings: true,
+  thirdPartyCookies: true,
+  stripTracking: true,
+  httpsOnly: false,
+  keepHistory: true,
 };
 
 function preference(name, value) {
   if (!Object.hasOwn(DEFAULTS, name)) return false;
-  if (name === 'search') return ['duckduckgo', 'qwant', 'google'].includes(value);
+  if (name === 'search') return typeof value === 'string' && (Object.hasOwn(SEARCH, value) || value === 'firefox');
+  if (name === 'privateSearch') return PRIVATE_SEARCH.includes(value);
+  if (name === 'torPort') return value === 0 || (Number.isInteger(value) && value >= 1024 && value <= 65535);
   return typeof value === 'boolean';
 }
 
 class Profile {
   constructor(directory) {
     this.file = path.join(directory, 'openweb.json');
-    const initial = { settings: DEFAULTS, bookmarks: [], history: [], tabs: [], activeIndex: 0, extensions: [] };
+    const initial = {
+      settings: DEFAULTS, bookmarks: [], history: [], tabs: [], activeIndex: 0, extensions: [],
+      homeModules: HOME_MODULES, shortcuts: [],
+    };
     this.data = initial;
     try {
       const saved = JSON.parse(fs.readFileSync(this.file, 'utf8'));
@@ -33,7 +48,12 @@ class Profile {
           ...Object.fromEntries(Object.entries(saved.settings ?? {}).filter(([key, value]) => preference(key, value))),
         },
         bookmarks: (saved.bookmarks ?? []).filter((entry) => webUrl(entry?.url)).slice(0, 1000),
-        history: (saved.history ?? []).filter((entry) => webUrl(entry?.url)).slice(0, 300),
+        history: (saved.history ?? []).filter((entry) => webUrl(entry?.url)).slice(0, 300).map((entry) => ({
+          ...entry, visits: Number.isSafeInteger(entry.visits) && entry.visits > 0 ? entry.visits : 1,
+        })),
+        homeModules: Array.isArray(saved.homeModules)
+          ? [...new Set(saved.homeModules.filter((id) => HOME_MODULES.includes(id)))] : HOME_MODULES,
+        shortcuts: (saved.shortcuts ?? []).filter((entry) => webUrl(entry?.url) && typeof entry.title === 'string').slice(0, 30),
         tabs: (saved.tabs ?? []).map((tab) => webUrl(tab)?.href ?? '').slice(0, 40),
         extensions: (saved.extensions ?? []).filter((extension) =>
           /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(extension?.key) && typeof extension.enabled === 'boolean'),
@@ -59,4 +79,4 @@ class Profile {
   }
 }
 
-module.exports = { Profile, preference };
+module.exports = { Profile, preference, HOME_MODULES, PRIVATE_SEARCH };
