@@ -14,9 +14,11 @@ const { connectTor } = require('./tor.cjs');
 const { STORE, storeId } = require('./webstore.cjs');
 const { openFirefox } = require('./firefox.cjs');
 const { stripTracking } = require('./privacy-rules.cjs');
+const { parseBookmarks, exportBookmarks, MAX_BOOKMARKS, MAX_IMPORT_SIZE } = require('./bookmarks.cjs');
 const { address, webUrl, isolated, fillLogin, extractArticle } = require('./navigation.cjs');
 
 const CHROME_HEIGHT = 106;
+const FIND_HEIGHT = 44;
 const MAX_TABS = 40;
 const HOME = path.join(__dirname, '../ui/index.html');
 const HOME_URL = pathToFileURL(HOME).href;
@@ -67,15 +69,18 @@ function setupSession(context) {
   context.setUserAgent(context.getUserAgent().replace(/\s+(?:Electron|OpenWeb)\/[^\s]+/gi, ''));
   context.on('will-download', (event, item, contents) => {
     const tab = guests.get(contents?.id);
-    if (!tab || tab.browser.downloading) return event.preventDefault();
+    if (!tab || tab.browser.downloadPrompt || tab.browser.downloads.filter(({ item }) => item).length >= 8) return event.preventDefault();
     tab.browser.download(item);
   });
 }
 
 class Tab {
-  constructor(browser, url, identifier = randomUUID()) {
+  constructor(browser, url, { pinned = false, muted = false } = {}) {
     this.browser = browser;
-    this.id = identifier;
+    this.id = randomUUID();
+    this.pinned = pinned;
+    this.muted = muted;
+    this.audible = false;
     this.url = '';
     this.pending = url;
     this.title = '';
@@ -97,6 +102,7 @@ class Tab {
     this.view = new WebContentsView({ webPreferences: { ...webPreferences, session: this.browser.session } });
     const contents = this.view.webContents;
     contents.setWebRTCIPHandlingPolicy('disable_non_proxied_udp');
+    contents.setAudioMuted(this.muted);
     const contentsId = contents.id;
     guests.set(contentsId, this);
     contents.once('destroyed', () => guests.delete(contentsId));
@@ -121,6 +127,7 @@ class Tab {
     });
     contents.on('did-start-navigation', (event) => {
       if (!event.isMainFrame || event.isSameDocument) return;
+      if (this.browser.active === this) this.browser.closeFind(false);
       this.pending = event.url;
       this.error = '';
       this.blocked = 0;
@@ -149,6 +156,11 @@ class Tab {
     });
     contents.on('render-process-gone', () => this.fail('Le processus de cette page s’est arrêté.'));
     contents.on('before-input-event', (event, input) => this.browser.shortcut(event, input));
+    contents.on('audio-state-changed', ({ audible }) => {
+      this.audible = Boolean(audible);
+      this.browser.publish();
+    });
+    contents.on('found-in-page', (_event, result) => this.browser.found(this, result));
     contents.on('context-menu', (_event, params) => {
       const link = webUrl(params.linkURL)?.href;
       const items = [];
@@ -160,6 +172,13 @@ class Tab {
       if (params.selectionText || params.isEditable) items.push({ label: 'Copier', click: () => contents.copy() });
       if (params.isEditable) items.push({ label: 'Coller', click: () => contents.paste() });
       if (!items.length) items.push({ label: 'Recharger', click: () => tab.reload() });
+      if (webUrl(tab.url) && !tab.error) {
+        items.push({ type: 'separator' });
+        items.push({ label: 'Rechercher dans la page', click: () => this.browser.openFind() });
+        items.push({ label: 'Enregistrer la page en PDF…', click: () => {
+          void this.browser.savePdf().catch((error) => this.browser.notify(error.message));
+        } });
+      }
       Menu.buildFromTemplate(items).popup({ window: this.browser.window });
     });
   }
@@ -226,6 +245,9 @@ class Tab {
     return {
       id: this.id,
       title: this.title || webUrl(this.url || this.pending)?.hostname || (this.extension ? 'Extension' : 'Nouvel onglet'),
+      pinned: this.pinned,
+      muted: this.muted,
+      audible: this.audible,
       url: this.error ? (this.pending || this.url) : (this.url || this.pending),
       error: this.error,
       home: !this.url && !this.pending,
@@ -249,7 +271,9 @@ class Browser {
     if (privateMode) setupSession(this.session);
     this.tabs = [];
     this.closedTabs = [];
-    this.downloads = [];
+    this.downloads = privateMode || !profile.data.settings.keepDownloads ? [] : [...profile.data.downloads];
+    this.find = null;
+    this.findRequest = null;
     this.history = privateMode ? [] : [...profile.data.history];
     this.panel = null;
     this.attached = null;
@@ -262,6 +286,7 @@ class Browser {
       minHeight: 440,
       title: privateMode ? 'OpenWeb · Navigation privée' : 'OpenWeb',
       backgroundColor: '#16182b',
+      ...(process.platform === 'linux' ? { icon: path.join(__dirname, '../assets/openweb.png') } : {}),
       autoHideMenuBar: true,
       webPreferences: {
         ...webPreferences,
@@ -293,9 +318,11 @@ class Browser {
     });
 
     const saved = privateMode || !profile.data.settings.restoreTabs ? [] : profile.data.tabs;
-    this.tabs = (saved.length ? saved : ['']).map((url) => new Tab(this, url));
+    this.tabs = saved.length ? saved.map(({ url, pinned, muted }) => new Tab(this, url, { pinned, muted }))
+      : [new Tab(this, '')];
     const selected = Number.isInteger(profile.data.activeIndex) ? profile.data.activeIndex : 0;
     this.active = this.tabs[Math.min(Math.max(selected, 0), this.tabs.length - 1)];
+    this.tabs.sort((left, right) => Number(right.pinned) - Number(left.pinned));
     this.active.start();
     void this.window.loadFile(HOME);
     if (privateMode) void this.checkTor();
@@ -349,6 +376,7 @@ class Browser {
   select(id) {
     const tab = this.tabs.find((candidate) => candidate.id === id);
     if (!tab) return;
+    this.closeFind();
     this.active = tab;
     this.panel = null;
     this.reader = null;
@@ -357,10 +385,43 @@ class Browser {
     this.saveSoon();
   }
 
+  tabMenu(tab) {
+    const url = webUrl(tab.url || tab.pending)?.href;
+    const duplicate = { label: 'Dupliquer', enabled: Boolean(url) && this.tabs.length < MAX_TABS, click: () => this.newTab(url) };
+    const pinned = { label: tab.pinned ? 'Désépingler' : 'Épingler', click: () => this.pinTab(tab) };
+    const muted = { label: tab.muted ? 'Réactiver le son' : 'Couper le son', click: () => this.muteTab(tab) };
+    const close = { label: 'Fermer l’onglet', click: () => this.closeTab(tab.id) };
+    const others = { label: 'Fermer les autres onglets non épinglés',
+      enabled: this.tabs.some((other) => other !== tab && !other.pinned),
+      click: () => {
+        this.select(tab.id);
+        for (const other of [...this.tabs]) if (other !== tab && !other.pinned) this.closeTab(other.id);
+      } };
+    Menu.buildFromTemplate([duplicate, pinned, muted, { type: 'separator' }, close, others]).popup({ window: this.window });
+  }
+
+  pinTab(tab) {
+    if (!this.tabs.includes(tab)) return;
+    this.tabs.splice(this.tabs.indexOf(tab), 1);
+    const boundary = this.tabs.filter((item) => item.pinned).length;
+    tab.pinned = !tab.pinned;
+    this.tabs.splice(boundary, 0, tab);
+    this.saveSoon();
+    this.publish();
+  }
+
+  muteTab(tab) {
+    tab.muted = !tab.muted;
+    tab.view?.webContents.setAudioMuted(tab.muted);
+    this.saveSoon();
+    this.publish();
+  }
+
   closeTab(id) {
     const index = this.tabs.findIndex((tab) => tab.id === id);
     if (index < 0) return;
     const [tab] = this.tabs.splice(index, 1);
+    if (this.active === tab) this.closeFind();
     const url = webUrl(tab.url || tab.pending)?.href;
     if (url) {
       this.closedTabs.unshift(url);
@@ -384,13 +445,15 @@ class Browser {
   resize() {
     if (!this.attached || this.window.isDestroyed()) return;
     const { width, height } = this.window.getContentBounds();
-    this.attached.setBounds({ x: 0, y: CHROME_HEIGHT, width, height: Math.max(0, height - CHROME_HEIGHT) });
+    const top = CHROME_HEIGHT + (this.find ? FIND_HEIGHT : 0);
+    this.attached.setBounds({ x: 0, y: top, width, height: Math.max(0, height - top) });
   }
 
   render() {
     if (this.closed || this.window.isDestroyed()) return;
     const tab = this.active;
     const next = this.canBrowse() && !this.panel && tab?.url && !tab.error ? tab.view : null;
+    if (!next) this.closeFind();
     if (next !== this.attached) {
       this.detach();
       if (next) {
@@ -435,13 +498,16 @@ class Browser {
       active: current,
       panel: this.panel,
       dark: profile.data.settings.dark,
+      animations: profile.data.settings.animations,
+      find: this.find,
       marked: !this.privateMode && profile.data.bookmarks.some((entry) => entry.url === this.active?.url),
       bookmarks: this.panel === 'bookmarks' ? profile.data.bookmarks : home && display.includes('favorites') ? profile.data.bookmarks.slice(0, 8) : [],
       history: this.panel === 'history' ? this.history : [],
       settings: this.panel === 'settings' ? profile.data.settings : null,
       filterStatus: privacy.status,
       blocking: profile.data.settings.blocking,
-      downloads: this.panel === 'downloads' ? this.downloads.map(({ item, ...download }) => download) : [],
+      downloads: this.panel === 'downloads' ? this.downloads.map(({ id, name, status, received, total, item }) =>
+        ({ id, name, status, received, total, active: Boolean(item), resumable: Boolean(item?.canResume()) })) : [],
       extensions: this.panel === 'extensions' ? extensions.list() : [],
       vault: this.panel === 'vault' ? vault.status() : null,
       reader: this.panel === 'reader' ? this.reader : null,
@@ -486,8 +552,10 @@ class Browser {
         history: this.history,
         tabs: keep ? this.tabs.map((tab) => {
           const url = webUrl(tab.url || tab.pending)?.href ?? '';
-          return url.length <= 8192 ? url : '';
+          return { url: url.length <= 8192 ? url : '', pinned: tab.pinned, muted: tab.muted };
         }) : [],
+        downloads: profile.data.settings.keepDownloads ? this.downloads.filter(({ item }) => !item)
+          .map(({ id, name, status, path }) => ({ id, name, status, path })) : [],
         activeIndex: keep ? this.tabs.indexOf(this.active) : 0,
       });
     } catch {
@@ -500,26 +568,150 @@ class Browser {
   }
 
   download(item) {
-    this.downloading = true;
     const record = { id: randomUUID(), name: item.getFilename(), received: 0, total: item.getTotalBytes(), status: 'progress', item };
+    this.downloadPrompt = record;
     this.downloads.unshift(record);
-    if (this.downloads.length > 100) this.downloads.pop();
+    if (this.downloads.length > 100) {
+      const oldestFinished = this.downloads.findLastIndex((entry) => !entry.item);
+      if (oldestFinished >= 0) this.downloads.splice(oldestFinished, 1);
+    }
     item.setSaveDialogOptions({ title: 'Enregistrer le téléchargement', nameFieldLabel: 'Nom du fichier' });
     this.publish();
     item.on('updated', (_event, state) => {
+      if (this.downloadPrompt === record && item.getSavePath()) this.downloadPrompt = null;
       record.received = item.getReceivedBytes();
       record.total = item.getTotalBytes();
-      record.status = state;
+      record.status = item.isPaused() ? 'paused' : state;
       this.publishSoon();
     });
     item.once('done', (_event, state) => {
-      this.downloading = false;
+      if (this.downloadPrompt === record) this.downloadPrompt = null;
       record.item = null;
       record.path = state === 'completed' ? item.getSavePath() : null;
       record.received = item.getReceivedBytes();
       record.status = state;
+      this.saveSoon();
       this.publish();
     });
+  }
+
+  openFind() {
+    if (!this.canBrowse() || this.panel || !this.active.view || !this.active.url || this.active.error) {
+      throw new Error('Ouvre une page pour y rechercher du texte.');
+    }
+    if (!this.find) this.find = { query: '', matches: 0, current: 0 };
+    this.resize();
+    this.publish();
+    this.window.webContents.focus();
+    this.window.webContents.send('openweb:find');
+  }
+
+  closeFind(clearSelection = true) {
+    if (!this.find) return;
+    this.find = null;
+    this.findRequest = null;
+    if (clearSelection) this.active.view?.webContents.stopFindInPage('clearSelection');
+    this.resize();
+    this.publish();
+  }
+
+  findText(value, forward = true) {
+    if (!this.find || typeof value !== 'string') return;
+    const query = value.slice(0, 400);
+    const contents = this.active.view?.webContents;
+    if (!contents) return;
+    if (!query) {
+      this.find = { query: '', matches: 0, current: 0 };
+      this.findRequest = null;
+      contents.stopFindInPage('clearSelection');
+      return;
+    }
+    const first = query !== this.find.query;
+    if (first) this.find = { query, matches: 0, current: 0 };
+    this.findRequest = contents.findInPage(query, { forward, findNext: first });
+  }
+
+  found(tab, result) {
+    if (!this.find || this.active !== tab || result.requestId !== this.findRequest || !result.finalUpdate) return;
+    this.find.matches = Math.max(0, result.matches);
+    this.find.current = Math.max(0, result.activeMatchOrdinal);
+    this.publish();
+  }
+
+  printablePage() {
+    const tab = this.active;
+    if (!this.canBrowse() || !tab.view || !webUrl(tab.url) || tab.loading || tab.error) {
+      throw new Error('Attends que la page soit chargée avant de l’imprimer.');
+    }
+    this.panel = null;
+    this.render();
+    return tab;
+  }
+
+  print() {
+    this.printablePage().view.webContents.print({}, (success, reason) => {
+      if (!success && !/cancel/i.test(reason ?? '')) this.notify('Impression indisponible sur cette machine.');
+    });
+  }
+
+  async savePdf() {
+    const tab = this.printablePage();
+    const contents = tab.view.webContents;
+    const url = contents.getURL();
+    const title = tab.summary().title.replace(/[<>:"/\\|?*\u0000-\u001f]/gu, ' ').trim().slice(0, 80);
+    const choice = await dialog.showSaveDialog(this.window, {
+      title: 'Enregistrer la page en PDF', defaultPath: `OpenWeb - ${title || 'page'}.pdf`,
+      filters: [{ name: 'Document PDF', extensions: ['pdf'] }],
+    });
+    if (choice.canceled || !choice.filePath) return;
+    if (contents.isDestroyed() || contents.getURL() !== url || contents.isLoadingMainFrame()) {
+      throw new Error('La page a changé pendant l’enregistrement.');
+    }
+    const pdf = await contents.printToPDF({ printBackground: true });
+    if (contents.isDestroyed() || contents.getURL() !== url || contents.isLoadingMainFrame()) {
+      throw new Error('La page a changé pendant l’enregistrement.');
+    }
+    await fs.promises.writeFile(choice.filePath, pdf);
+    this.notify('La page a été enregistrée en PDF.');
+  }
+
+  async transferBookmarks(importing) {
+    const filters = [{ name: 'Favoris HTML', extensions: ['html', 'htm'] }];
+    if (importing) {
+      const choice = await dialog.showOpenDialog(this.window, {
+        title: 'Importer des favoris', properties: ['openFile'], filters,
+      });
+      if (choice.canceled || !choice.filePaths[0]) return;
+      const file = await fs.promises.open(choice.filePaths[0], 'r');
+      let entries;
+      try {
+        const information = await file.stat();
+        if (!information.isFile() || information.size > MAX_IMPORT_SIZE) throw new Error('Choisis un fichier HTML de 5 Mio au maximum.');
+        const buffer = Buffer.alloc(MAX_IMPORT_SIZE + 1);
+        let size = 0;
+        while (size < buffer.length) {
+          const { bytesRead } = await file.read(buffer, size, buffer.length - size, size);
+          if (!bytesRead) break;
+          size += bytesRead;
+        }
+        if (size > MAX_IMPORT_SIZE) throw new Error('Le fichier de favoris dépasse 5 Mio.');
+        entries = parseBookmarks(buffer.toString('utf8', 0, size));
+      } finally {
+        await file.close();
+      }
+      const previous = profile.data.bookmarks;
+      const existing = new Set(previous.map(({ url }) => webUrl(url)?.href));
+      const added = entries.filter(({ url }) => !existing.has(url)).slice(0, Math.max(0, MAX_BOOKMARKS - previous.length));
+      if (added.length) profile.commit({ bookmarks: [...previous, ...added] });
+      this.notify(added.length ? `${added.length} favori(s) importé(s).` : 'Aucun nouveau favori HTTP ou HTTPS à importer.');
+    } else {
+      const choice = await dialog.showSaveDialog(this.window, {
+        title: 'Exporter les favoris', defaultPath: 'favoris-openweb.html', filters,
+      });
+      if (choice.canceled || !choice.filePath) return;
+      await fs.promises.writeFile(choice.filePath, exportBookmarks(profile.data.bookmarks), 'utf8');
+      this.notify('Les favoris ont été exportés.');
+    }
   }
 
   focusAddress() {
@@ -562,6 +754,11 @@ class Browser {
     const key = input.key.toLowerCase();
     let action;
     if (command && !input.alt) {
+      if (key === 'f' && !input.shift) action = () => this.openFind();
+      if (key === 'p') action = input.shift
+        ? () => { void this.savePdf().catch((error) => this.notify(error.message)); } : () => this.print();
+      if (key === 'a' && input.shift) action = () => { this.panel = 'tabs'; this.render(); };
+      if (key === 'o' && input.shift && !this.privateMode) action = () => { this.panel = 'bookmarks'; this.render(); };
       if (key === 'l') action = () => this.focusAddress();
       if (key === 't') action = () => {
         const url = input.shift ? this.closedTabs[0] : '';
@@ -576,10 +773,18 @@ class Browser {
       if (['=', '+', '-', '0'].includes(key)) action = () => this.zoom(key === '0' ? 0 : key === '-' ? -0.1 : 0.1);
       if (/^[1-9]$/.test(key)) action = () => this.select((key === '9' ? this.tabs.at(-1) : this.tabs[Number(key) - 1])?.id);
     }
+    if (input.control && key === 'tab') action = () => {
+      const current = this.tabs.indexOf(this.active);
+      const step = input.shift ? -1 : 1;
+      this.select(this.tabs[(current + step + this.tabs.length) % this.tabs.length].id);
+    };
     if (input.alt && key === 'arrowleft') action = () => this.moveHistory(-1);
     if (input.alt && key === 'arrowright') action = () => this.moveHistory(1);
-    if (key === 'escape' && (this.panel || this.active.loading)) action = () => {
-      if (this.panel) {
+    if (key === 'escape' && (this.find || this.panel || this.active.loading)) action = () => {
+      if (this.find) {
+        this.closeFind();
+        this.active.view?.webContents.focus();
+      } else if (this.panel) {
         this.panel = null;
         this.render();
       } else this.active.view?.webContents.stop();
@@ -597,12 +802,44 @@ class Browser {
   async perform(action, input = {}) {
     const tab = this.active;
     const contents = tab.view?.webContents;
-    const allowPrivate = ['downloads', 'reader'];
+    const allowPrivate = ['downloads', 'reader', 'tabs'];
     switch (action) {
       case 'state': return this.state();
       case 'tab:new': this.newTab(); this.focusAddress(); break;
       case 'tab:select': this.select(input.id); break;
       case 'tab:close': this.closeTab(input.id); break;
+      case 'tab:menu':
+      case 'tab:pin':
+      case 'tab:mute':
+      case 'tab:duplicate': {
+        const selected = this.tabs.find(({ id }) => id === input.id);
+        if (!selected) break;
+        if (action === 'tab:menu') this.tabMenu(selected);
+        if (action === 'tab:pin') this.pinTab(selected);
+        if (action === 'tab:mute') this.muteTab(selected);
+        if (action === 'tab:duplicate') {
+          const url = webUrl(selected.url || selected.pending);
+          if (url) this.newTab(url.href);
+        }
+        break;
+      }
+      case 'tab:move': {
+        const from = this.tabs.findIndex(({ id }) => id === input.id);
+        const to = this.tabs.findIndex(({ id }) => id === input.target);
+        if (from < 0 || to < 0 || from === to || this.tabs[from].pinned !== this.tabs[to].pinned) break;
+        const [moved] = this.tabs.splice(from, 1);
+        this.tabs.splice(to, 0, moved);
+        this.saveSoon();
+        break;
+      }
+      case 'find:open': this.openFind(); break;
+      case 'find:close':
+        this.closeFind();
+        contents?.focus();
+        break;
+      case 'find:query': this.findText(input.value, input.forward !== false); break;
+      case 'page:print': this.print(); break;
+      case 'page:pdf': await this.savePdf(); break;
       case 'navigate': {
         this.requireConnection();
         const options = profile.data.settings;
@@ -648,13 +885,17 @@ class Browser {
         if (this.privateMode) break;
         if (!webUrl(tab.url) || tab.error || tab.url.length > 8192) throw new Error('Ouvre une page à ajouter aux favoris.');
         const marked = profile.data.bookmarks.some(({ url }) => url === tab.url);
-        if (!marked && profile.data.bookmarks.length >= 1000) throw new Error('La limite de favoris est atteinte.');
+        if (!marked && profile.data.bookmarks.length >= MAX_BOOKMARKS) throw new Error('La limite de favoris est atteinte.');
         profile.commit({
           bookmarks: marked ? profile.data.bookmarks.filter(({ url }) => url !== tab.url)
             : [{ title: tab.summary().title, url: tab.url }, ...profile.data.bookmarks],
         });
         break;
       }
+      case 'bookmark:import':
+      case 'bookmark:export':
+        if (!this.privateMode && this.panel === 'bookmarks') await this.transferBookmarks(action === 'bookmark:import');
+        break;
       case 'bookmark:remove':
         if (!this.privateMode) profile.commit({ bookmarks: profile.data.bookmarks.filter(({ url }) => url !== input.url) });
         break;
@@ -719,9 +960,28 @@ class Browser {
       case 'filters:refresh':
         if (!this.privateMode && this.panel === 'settings') await privacy.refresh();
         break;
-      case 'download:cancel':
-        this.downloads.find(({ id }) => id === input.id)?.item?.cancel();
+      case 'download:clear':
+        if (this.panel === 'downloads') {
+          this.downloads = this.downloads.filter(({ item }) => Boolean(item));
+          this.saveSoon();
+        }
         break;
+      case 'download:pause':
+      case 'download:resume':
+      case 'download:cancel': {
+        const record = this.downloads.find(({ id }) => id === input.id);
+        if (!record?.item) break;
+        if (action === 'download:cancel') record.item.cancel();
+        if (action === 'download:pause' && record.status !== 'paused' && record.status !== 'interrupted') {
+          record.item.pause();
+          record.status = 'paused';
+        }
+        if (action === 'download:resume' && record.item.canResume()) {
+          record.item.resume();
+          record.status = 'progressing';
+        }
+        break;
+      }
       case 'download:show': {
         const record = this.downloads.find(({ id, status }) => id === input.id && status === 'completed');
         if (record?.path) shell.showItemInFolder(record.path);

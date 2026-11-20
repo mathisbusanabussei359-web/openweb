@@ -1,4 +1,4 @@
-name: Compiler et tester OpenWeb
+name: Compiler et préparer les installateurs OpenWeb
 
 on:
   push:
@@ -34,12 +34,54 @@ jobs:
           sudo chown root:root node_modules/electron/dist/chrome-sandbox
           sudo chmod 4755 node_modules/electron/dist/chrome-sandbox
           xvfb-run -a npm run test:desktop -- --disable-gpu
-      - run: npm run package
-      - name: Créer une archive qui conserve les permissions
-        shell: bash
-        run: tar -czf openweb-${{ runner.os }}-${{ runner.arch }}.tar.gz -C dist .
+      - name: Préparer NSIS
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $nsis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+          if (!(Test-Path $nsis)) {
+            choco install nsis --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - run: npm run package:installer
+      - name: Vérifier l’installation et la désinstallation Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $setup = (Get-ChildItem dist/installers/OpenWeb-Setup-*.exe | Select-Object -First 1).FullName
+          $installation = Start-Process -FilePath $setup -ArgumentList '/S' -Wait -PassThru
+          $installed = Join-Path $env:LOCALAPPDATA 'Programs\OpenWeb'
+          $registry = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\OpenWeb'
+          if ($installation.ExitCode -ne 0 -or !(Test-Path "$installed\OpenWeb.exe") -or !(Test-Path $registry)) {
+            throw "Le setup n'a pas terminé l'installation."
+          }
+          if (!(Test-Path "$installed\resources\app.asar.unpacked\app\openweb-native.node")) {
+            throw "Module Rust absent de l'installation."
+          }
+          $profile = Join-Path $env:APPDATA 'OpenWeb'
+          New-Item -Path $profile -ItemType Directory -Force | Out-Null
+          $marker = Join-Path $profile 'installer-smoke-test.txt'
+          Set-Content -Path $marker -Value 'keep'
+          $temporary = Join-Path $env:RUNNER_TEMP 'openweb-uninstall.exe'
+          Copy-Item "$installed\Uninstall.exe" $temporary
+          $uninstall = Start-Process -FilePath $temporary -ArgumentList @('/S', "_?=$installed") -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0 -or (Test-Path "$installed\OpenWeb.exe") -or (Test-Path $registry) -or !(Test-Path $marker)) {
+            throw "La désinstallation a échoué ou le profil a été supprimé."
+          }
+      - name: Vérifier le paquet Debian
+        if: runner.os == 'Linux'
+        run: |
+          dpkg-deb --info dist/installers/*.deb
+          tmp_dir="$(mktemp -d)"
+          dpkg-deb -x dist/installers/*.deb "$tmp_dir"
+          test "$(stat -c %a "$tmp_dir/opt/openweb/chrome-sandbox")" = 4755
+          test -x "$tmp_dir/opt/openweb/OpenWeb"
+          test -f "$tmp_dir/usr/share/applications/openweb.desktop"
+      - name: Vérifier l’image disque macOS
+        if: runner.os == 'macOS'
+        run: hdiutil verify dist/installers/*.dmg
       - uses: actions/upload-artifact@v7
         with:
-          name: OpenWeb-${{ runner.os }}-${{ runner.arch }}
-          path: openweb-${{ runner.os }}-${{ runner.arch }}.tar.gz
+          path: dist/installers/*
           if-no-files-found: error
+          archive: false

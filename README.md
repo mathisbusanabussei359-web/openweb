@@ -1,8 +1,18 @@
 # OpenWeb
 
-OpenWeb 1.0 est un navigateur de bureau en français. Chromium affiche les sites dans des processus isolés. Un module Rust assure le filtrage réseau et le chiffrement du coffre.
+OpenWeb 1.1 est un navigateur de bureau en français. Chromium affiche les sites dans des processus isolés. Un module Rust assure le filtrage réseau et le chiffrement du coffre.
 
-## Démarrer
+## Installer OpenWeb
+
+Télécharge le fichier correspondant à ton système dans **Artifacts** d’une exécution réussie. [Installateurs OpenWeb](https://github.com/mathisbusanabussei359-web/openweb/actions)
+
+- **Windows x64** — Lance `OpenWeb-Setup-1.1.0-x64.exe`. Le programme installe OpenWeb pour ton compte et ajoute un raccourci au menu Démarrer. La désinstallation est accessible dans les paramètres Windows et conserve ton profil de navigation.
+- **macOS Apple Silicon** — Ouvre `OpenWeb-1.1.0-macOS-arm64.dmg`, puis glisse OpenWeb dans **Applications**.
+- **Debian et Ubuntu x64** — Installe `openweb_1.1.0_amd64.deb` depuis ton gestionnaire de paquets ou avec `sudo apt install ./openweb_1.1.0_amd64.deb`. OpenWeb apparaît ensuite dans le menu des applications.
+
+Les installateurs Windows et macOS n’ont pas de signature de distribution reconnue par SmartScreen ou Gatekeeper. Sous macOS, le code de l’application porte une signature ad hoc et l’image est vérifiée pendant la compilation.
+
+## Compiler et démarrer
 
 Installe [Node.js](https://nodejs.org/) 22.12 ou plus récent et [Rust](https://www.rust-lang.org/tools/install) stable (1.100 ou plus récent). Sous Windows, installe aussi les outils C++ de Visual Studio. Sous Linux, il faut les bibliothèques de bureau requises par Chromium, dont GTK 3 et NSS, et un système compatible avec le bac à sable Chromium.
 
@@ -14,7 +24,7 @@ npm run build
 npm start
 ```
 
-`npm run package` crée une application portable dans `dist/` pour le système et l’architecture utilisés pour la compilation. Les archives de compilation sont aussi accessibles depuis les exécutions réussies dans [GitHub Actions](https://github.com/mathisbusanabussei359-web/openweb/actions). Les builds sont sans signature de distribution ni mise à jour automatique.
+`npm run package` crée une application portable dans `dist/` pour le système et l’architecture utilisés pour la compilation. `npm run package:installer` construit aussi l’installateur dans `dist/installers/`. Pour compiler cet installateur localement, utilise NSIS sous Windows, les outils système `codesign` et `hdiutil` sous macOS ou `dpkg-deb` sous Debian/Ubuntu.
 
 Lance `OpenWeb.exe` sous Windows, `OpenWeb.app` sous macOS ou `./OpenWeb` depuis le dossier extrait sous Linux. Le lanceur Linux utilise le bac à sable Chromium fondé sur les espaces de noms utilisateur lorsque l’assistant setuid est indisponible. Sur une distribution qui restreint les espaces de noms pour les applications de bureau, l’assistant Chromium livré dans le paquet doit appartenir à `root:root` et être installé en mode `4755` par l’administrateur.
 
@@ -23,6 +33,14 @@ Lance `OpenWeb.exe` sous Windows, `OpenWeb.app` sous macOS ou `./OpenWeb` depuis
 - Dans un nouvel onglet, clique sur **Personnaliser l’accueil** pour activer et réordonner les accès rapides, les favoris, les sites les plus consultés, les pages récentes et tes raccourcis. Les sites les plus consultés sont calculés localement à partir de l’historique du profil normal.
 - Dans **Paramètres**, choisis DuckDuckGo, Brave Search, Bing, Startpage, Ecosia, Qwant ou Google. L’option Firefox transmet la recherche à Firefox installé sur l’ordinateur, qui utilise son moteur par défaut. Le moteur en navigation privée se règle séparément.
 - OpenWeb propose les onglets, les favoris, l’historique, les téléchargements, le zoom et le mode lecture. Les raccourcis `Ctrl/Cmd+L`, `Ctrl/Cmd+T`, `Ctrl/Cmd+Maj+T` et `Ctrl/Cmd+Maj+N` ouvrent respectivement l’adresse, un onglet, le dernier onglet fermé et une fenêtre privée.
+
+## Onglets, favoris et fichiers
+
+- Clique droit sur un onglet pour l’épingler, le dupliquer, couper le son ou fermer les autres onglets non épinglés. Glisse les onglets pour les réorganiser dans leur groupe. Ouvre la recherche d’onglets avec le bouton à côté de **+** ou `Ctrl/Cmd+Maj+A`.
+- `Ctrl/Cmd+F` affiche les occurrences d’un texte dans la page. Utilise **Entrée** ou **Maj+Entrée** pour les parcourir. `Ctrl/Cmd+P` ouvre l’impression et `Ctrl/Cmd+Maj+P` enregistre la page en PDF.
+- **Favoris → Importer / Exporter** utilise des fichiers de favoris HTML compatibles avec Chrome, Brave et Firefox. L’import ajoute les liens HTTP et HTTPS sans doublons à la liste de favoris.
+- Dans **Téléchargements**, mets un transfert en pause, reprends-le ou annule-le. La conservation de la liste des téléchargements est réglable pour le profil normal.
+- Les animations de l’interface peuvent être désactivées dans **Paramètres**. La préférence système de réduction des mouvements est prioritaire.
 
 ## Navigation privée via Tor
 
@@ -64,6 +82,6 @@ npm test
 npm run test:desktop
 ```
 
-Le test de bureau utilise OpenSSL, un affichage graphique, un serveur HTTPS et un proxy SOCKS5 locaux. Il teste notamment la navigation, le coffre, une extension Manifest V3, la personnalisation de l’accueil et le refus du trafic privé tant que la vérification Tor échoue. Le test utilise une réponse Tor simulée pour éviter de dépendre d’un circuit public.
+Le test de bureau utilise OpenSSL, un affichage graphique, un serveur HTTPS et un proxy SOCKS5 locaux. Il teste notamment la recherche dans la page, l’export PDF, le transfert des favoris, la reprise d’un téléchargement, les onglets, le coffre, une extension Manifest V3 et le refus du trafic privé tant que la vérification Tor échoue. Le test utilise une réponse Tor simulée pour éviter de dépendre d’un circuit public.
 
 Le filtrage utilise la bibliothèque Rust adblock de Brave, distribuée sous MPL 2.0. [Code source de la bibliothèque](https://github.com/brave/adblock-rust/tree/v0.13.6)

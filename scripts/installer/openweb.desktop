@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=OpenWeb
+Comment=Naviguer sur le Web
+Type=Application
+Exec=/opt/openweb/OpenWeb
+Icon=openweb
+Terminal=false
+Categories=Network;WebBrowser;
+StartupWMClass=openweb

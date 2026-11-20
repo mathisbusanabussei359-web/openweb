@@ -5,4 +5,5 @@ contextBridge.exposeInMainWorld('openweb', {
   onState: (listener) => ipcRenderer.on('openweb:changed', (_event, state) => listener(state)),
   onNotice: (listener) => ipcRenderer.on('openweb:notice', (_event, message) => listener(message)),
   onAddress: (listener) => ipcRenderer.on('openweb:address', () => listener()),
+  onFind: (listener) => ipcRenderer.on('openweb:find', () => listener()),
 });

@@ -14,6 +14,7 @@
       <span class="mini-mark" aria-hidden="true"></span>
       <div id="tabs" class="tabs" role="tablist" aria-label="Onglets"></div>
       <button class="icon new-tab" id="new-tab" type="button" aria-label="Nouvel onglet" title="Nouvel onglet">+</button>
+      <button class="icon tabs-tool" type="button" data-panel="tabs" aria-label="Rechercher un onglet" title="Rechercher un onglet">⌄</button>
       <button id="private-label" class="private-label quiet" type="button" hidden>Tor</button>
     </div>
     <nav class="toolbar" aria-label="Commandes du navigateur">
@@ -37,6 +38,14 @@
         <button class="icon regular-only" type="button" data-panel="settings" title="Paramètres" aria-label="Paramètres">⚙︎</button>
       </div>
     </nav>
+    <div class="load-progress" id="load-progress" aria-hidden="true" hidden></div>
+    <form id="find-bar" class="find-bar" aria-label="Recherche dans la page" autocomplete="off" hidden>
+      <input id="find-text" type="search" maxlength="400" aria-label="Rechercher dans la page" placeholder="Rechercher dans la page" spellcheck="false">
+      <output id="find-count" for="find-text" aria-live="polite"></output>
+      <button class="icon" id="find-prev" type="button" aria-label="Occurrence précédente" title="Occurrence précédente">↑</button>
+      <button class="icon" id="find-next" type="button" aria-label="Occurrence suivante" title="Occurrence suivante">↓</button>
+      <button class="icon" id="find-close" type="button" aria-label="Fermer la recherche" title="Fermer la recherche">×</button>
+    </form>
   </header>
   <main id="workspace" class="workspace">
     <section id="home" class="home">

@@ -11,6 +11,11 @@ const output = await packager({
   name: 'OpenWeb',
   out: path.join(dir, 'dist'),
   overwrite: true,
+  ...(process.platform === 'win32' ? { icon: path.join(dir, 'assets', 'openweb.ico') } : {}),
+  ...(process.platform === 'darwin' ? {
+    icon: path.join(dir, 'assets', 'openweb.icns'),
+    osxSign: { identity: '-', identityValidation: false, preAutoEntitlements: false, continueOnError: false },
+  } : {}),
   download: { checksums: require('electron/checksums.json') },
   asar: { unpack: '**/*.node' },
   ignore: /^\/(?:\.git(?:hub)?|dist|native|scripts|tests)(?:\/|$)/,

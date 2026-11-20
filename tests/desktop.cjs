@@ -23,7 +23,16 @@ fs.writeFileSync(path.join(ext, 'manifest.json'), JSON.stringify({
   content_scripts: [{ matches: ['https://127.0.0.1/*'], js: ['content.js'] }],
 }));
 fs.writeFileSync(path.join(ext, 'content.js'), 'document.documentElement.dataset.openwebExtension = "loaded";');
-dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [ext] });
+const bookmarkSource = path.join(root, 'import.html');
+const bookmarkExport = path.join(root, 'export.html');
+const pdfExport = path.join(root, 'page.pdf');
+fs.writeFileSync(bookmarkSource, '<DT><A HREF="https://example.org/?q=1&amp;n=2">Import &amp; test</A>');
+dialog.showOpenDialog = async (_window, options) => ({
+  canceled: false, filePaths: [options.properties.includes('openFile') ? bookmarkSource : ext],
+});
+dialog.showSaveDialog = async (_window, options) => ({
+  canceled: false, filePath: options.filters[0].extensions.includes('pdf') ? pdfExport : bookmarkExport,
+});
 dialog.showMessageBox = async () => ({ response: 1 });
 dialog.showErrorBox = (title, message) => console.error(title, message);
 
@@ -51,6 +60,23 @@ const server = https.createServer({ key: fs.readFileSync(key), cert: certificate
     return response.writeHead(200).end('fixture');
   }
   if (request.url === '/redirect') return response.writeHead(302, { Location: '/linked' }).end();
+  if (request.url === '/slow-download') {
+    const total = 1024 * 1024;
+    const chunk = Buffer.alloc(16 * 1024, 'x');
+    let sent = 0;
+    response.writeHead(200, {
+      'Content-Type': 'application/octet-stream',
+      'Content-Disposition': 'attachment; filename="slow.txt"',
+      'Content-Length': total,
+    });
+    const timer = setInterval(() => {
+      response.write(chunk);
+      sent += chunk.length;
+      if (sent === total) response.end();
+    }, 65);
+    response.once('close', () => clearInterval(timer));
+    return;
+  }
   if (request.url === '/download') {
     return response.writeHead(200, {
       'Content-Type': 'application/octet-stream',
@@ -197,6 +223,26 @@ async function run() {
   await command(window, 'bookmark:toggle');
   const bookmarks = await command(window, 'panel', { name: 'bookmarks' });
   assert.equal(bookmarks.bookmarks[0].url, address + '/login');
+  const imported = await command(window, 'bookmark:import');
+  assert.ok(imported.bookmarks.some(({ title, url }) => title === 'Import & test' && url === 'https://example.org/?q=1&n=2'));
+  await command(window, 'bookmark:export');
+  assert.match(fs.readFileSync(bookmarkExport, 'utf8'), /Import &amp; test/);
+
+  await command(window, 'panel', { name: null });
+  await command(window, 'find:open');
+  await ui(window, `(() => {
+    const input = document.querySelector('#find-text');
+    input.value = 'paragraphe';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  })()`);
+  await waitFor(async () => (await command(window, 'state')).find?.matches === 6, 'find in page');
+  await command(window, 'find:query', { value: 'paragraphe', forward: true });
+  await waitFor(async () => (await command(window, 'state')).find?.current === 2, 'next search result');
+  await command(window, 'find:close');
+  assert.equal((await command(window, 'state')).find, null);
+  await command(window, 'page:pdf');
+  assert.equal(fs.readFileSync(pdfExport).subarray(0, 5).toString('ascii'), '%PDF-');
   const article = await command(window, 'panel', { name: 'reader' });
   assert.equal(article.reader.title, 'OpenWeb Test');
   assert.ok(article.reader.blocks.length >= 2);
@@ -220,6 +266,8 @@ async function run() {
 
   await command(window, 'panel', { name: 'settings' });
   await command(window, 'setting', { name: 'blocking', value: false });
+  await command(window, 'setting', { name: 'animations', value: false });
+  assert.equal(await ui(window, 'document.documentElement.classList.contains("no-motion")'), true);
   const normal = await navigate(window, address + '/regular');
   assert.ok(adRequests >= 1);
   await normal.executeJavaScript("document.cookie = 'regularSession=1; SameSite=Strict'");
@@ -229,6 +277,21 @@ async function run() {
   await command(window, 'panel', { name: 'downloads' });
   await waitFor(async () => (await command(window, 'state')).downloads[0]?.status === 'completed', 'download');
   assert.equal(fs.readFileSync(savePath, 'utf8'), 'payload');
+  const slowPath = path.join(root, 'slow.txt');
+  normal.session.once('will-download', (_event, item) => item.setSavePath(slowPath));
+  normal.downloadURL(address + '/slow-download');
+  const ongoing = await waitFor(async () => (await command(window, 'state')).downloads
+    .find(({ name, received }) => name === 'slow.txt' && received > 0), 'slow download start');
+  const paused = await command(window, 'download:pause', { id: ongoing.id });
+  assert.equal(paused.downloads[0].status, 'paused');
+  assert.equal(paused.downloads[0].resumable, true);
+  await command(window, 'download:resume', { id: ongoing.id });
+  await waitFor(async () => (await command(window, 'state')).downloads[0]?.status === 'completed', 'download resume');
+  assert.equal(fs.statSync(slowPath).size, 1024 * 1024);
+  await waitFor(() => JSON.parse(fs.readFileSync(path.join(data, 'openweb.json'))).downloads
+    ?.some(({ id }) => id === ongoing.id), 'persisted downloads');
+  await command(window, 'download:clear');
+  assert.equal(fs.existsSync(slowPath), true);
 
   await command(window, 'panel', { name: 'extensions' });
   const installed = await command(window, 'extensions:add');
@@ -286,10 +349,23 @@ async function run() {
   assert.equal(tabs.length, 2);
   await command(window, 'tab:close', { id: tabs[1].id });
   assert.deepEqual((await command(window, 'state')).tabs.map(({ id: tabId }) => tabId), [tabs[0].id]);
+  const duplicated = await command(window, 'tab:duplicate', { id: tabs[0].id });
+  assert.equal(duplicated.tabs.length, 2);
+  const duplicateId = duplicated.active.id;
+  const moved = await command(window, 'tab:move', { id: duplicateId, target: tabs[0].id });
+  assert.equal(moved.tabs[0].id, duplicateId);
+  const pinned = await command(window, 'tab:pin', { id: duplicateId });
+  assert.equal(pinned.tabs[0].id, duplicateId);
+  assert.equal(pinned.tabs[0].pinned, true);
+  const muted = await command(window, 'tab:mute', { id: duplicateId });
+  assert.equal(muted.active.muted, true);
+  await command(window, 'panel', { name: 'tabs' });
+  assert.ok(await ui(window, 'Boolean(document.querySelector("#tab-search"))'));
+  await command(window, 'tab:close', { id: duplicateId });
   const installedList = await command(window, 'panel', { name: 'extensions' });
   await command(window, 'extensions:set', { key: installedList.extensions[0].key, value: null });
   assert.equal(session.fromPartition('persist:openweb-web').extensions.getAllExtensions().length, 0);
-  console.log('Desktop smoke test passed: navigation, filters, home modules, vault, extensions, and fail-closed SOCKS routing.');
+  console.log('Desktop smoke test passed: find, PDF, bookmark transfer, downloads, tab tools, vault, extensions, and SOCKS routing.');
 }
 
 function finish(error) {

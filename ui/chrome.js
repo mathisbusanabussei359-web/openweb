@@ -12,6 +12,7 @@ const names = {
   reader: 'Mode lecture',
   settings: 'Paramètres',
   vault: 'Coffre de mots de passe',
+  tabs: 'Rechercher un onglet',
 };
 let state;
 let tabKey;
@@ -28,6 +29,8 @@ const modules = {
 let editing;
 let noticeTimer;
 let addressDirty = false;
+let draggingTab = null;
+let findTimer;
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -101,6 +104,7 @@ function toolbar(next) {
   $('back').disabled = !active.back;
   $('forward').disabled = !active.forward;
   $('reload').disabled = !active.url;
+  $('load-progress').hidden = !active.loading;
   const reload = active.loading ? 'Arrêter le chargement' : 'Recharger';
   $('reload').textContent = active.loading ? '×' : '↻';
   $('reload').setAttribute('aria-label', reload);
@@ -135,28 +139,77 @@ function toolbar(next) {
 }
 
 function tabs(next) {
-  const signature = JSON.stringify([next.active.id, next.tabs.map(({ id, title }) => [id, title])]);
+  const signature = JSON.stringify([next.active.id, next.tabs.map(({ id, title, pinned, muted, audible }) =>
+    [id, title, pinned, muted, audible])]);
   if (signature === tabKey) return;
   const strip = $('tabs');
   const oldScroll = strip.scrollLeft;
+  const previous = new Set([...strip.children].map((tab) => tab.dataset.id));
   const focusId = strip.contains(document.activeElement) ? document.activeElement.dataset.tab : null;
   tabKey = signature;
   strip.replaceChildren();
   let selected;
   for (const tab of next.tabs) {
     const item = el('div', 'tab');
+    item.dataset.id = tab.id;
+    item.draggable = true;
+    item.classList.toggle('pinned', tab.pinned);
+    item.classList.toggle('tab-enter', !previous.has(tab.id));
+    item.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      void action('tab:menu', { id: tab.id });
+    });
+    item.addEventListener('auxclick', (event) => {
+      if (event.button === 1) action('tab:close', { id: tab.id });
+    });
+    item.addEventListener('dragstart', (event) => {
+      draggingTab = tab;
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('application/x-openweb-tab', tab.id);
+    });
+    item.addEventListener('dragend', () => {
+      draggingTab = null;
+      for (const other of strip.children) other.classList.remove('drop-target');
+    });
+    item.addEventListener('dragover', (event) => {
+      if (draggingTab && draggingTab.pinned === tab.pinned && tab.id !== draggingTab.id) {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'move';
+        item.classList.add('drop-target');
+      }
+    });
+    item.addEventListener('dragleave', () => item.classList.remove('drop-target'));
+    item.addEventListener('drop', (event) => {
+      event.preventDefault();
+      item.classList.remove('drop-target');
+      const source = draggingTab;
+      draggingTab = null;
+      if (source && event.dataTransfer.getData('application/x-openweb-tab') === source.id) {
+        void action('tab:move', { id: source.id, target: tab.id });
+      }
+    });
     const select = button('', () => action('tab:select', { id: tab.id }), 'tab-select');
     select.dataset.tab = tab.id;
     select.setAttribute('role', 'tab');
     select.setAttribute('aria-selected', String(tab.id === next.active.id));
     select.setAttribute('aria-controls', 'workspace');
-    select.title = tab.title;
-    const dot = el('span', 'tab-dot');
+    select.setAttribute('aria-label', tab.pinned ? `${tab.title}, épinglé` : tab.title);
+    select.title = tab.pinned ? `${tab.title} · Épinglé` : tab.title;
+    const dot = el('span', 'tab-dot', tab.pinned ? tab.title.trim().charAt(0).toUpperCase() || 'O' : '');
     dot.setAttribute('aria-hidden', 'true');
     select.append(dot, el('span', 'tab-name', tab.title));
-    const close = button('×', () => action('tab:close', { id: tab.id }), 'tab-close');
-    close.setAttribute('aria-label', `Fermer ${tab.title}`);
-    item.append(select, close);
+    item.append(select);
+    if (tab.muted || tab.audible) {
+      const audio = button(tab.muted ? '♪̸' : '♪', () => action('tab:mute', { id: tab.id }), 'tab-close tab-audio');
+      audio.title = tab.muted ? 'Réactiver le son' : 'Couper le son';
+      audio.setAttribute('aria-label', `${audio.title} dans ${tab.title}`);
+      item.append(audio);
+    }
+    if (!tab.pinned) {
+      const close = button('×', () => action('tab:close', { id: tab.id }), 'tab-close');
+      close.setAttribute('aria-label', `Fermer ${tab.title}`);
+      item.append(close);
+    }
     strip.append(item);
     if (tab.id === next.active.id) selected = item;
     if (tab.id === focusId) select.focus({ preventScroll: true });
@@ -165,8 +218,43 @@ function tabs(next) {
   selected?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 }
 
+function tabSearch(next, previousSearch) {
+  const results = card();
+  const search = el('div', 'card pad');
+  const query = field(search, 'Nom ou adresse', 'tab-search', {
+    type: 'search', maxLength: 240, placeholder: 'Chercher dans les onglets ouverts', id: 'tab-search',
+    value: previousSearch,
+  });
+  function filter() {
+    const needle = query.value.toLocaleLowerCase().trim();
+    results.replaceChildren();
+    const matches = next.tabs.filter((tab) => (tab.title + '\n' + tab.url).toLocaleLowerCase().includes(needle));
+    if (!matches.length) results.append(el('p', 'empty', 'Aucun onglet correspondant.'));
+    for (const entry of matches) {
+      const open = button(entry.title, () => action('tab:select', { id: entry.id }), 'label-link');
+      const pin = button(entry.pinned ? 'Désépingler' : 'Épingler', () => action('tab:pin', { id: entry.id }));
+      const duplicate = button('Dupliquer', () => action('tab:duplicate', { id: entry.id }));
+      duplicate.disabled = !/^https?:/.test(entry.url) || next.tabs.length >= 40;
+      results.append(row(open, entry.url || (entry.pinned ? 'Épinglé' : ''), [pin, duplicate]));
+    }
+  }
+  query.addEventListener('input', filter);
+  query.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      results.querySelector('.label-link')?.click();
+    }
+  });
+  filter();
+  return [search, results];
+}
+
 function links(name, items) {
   const list = card();
+  if (name === 'bookmarks') list.append(row('Transférer les favoris', 'Fichier HTML de Chrome, Brave ou Firefox.', [
+    button('Importer', () => action('bookmark:import'), 'secondary'),
+    button('Exporter', () => action('bookmark:export')),
+  ]));
   if (!items.length) list.append(el('p', 'empty', name === 'history' ? 'Aucune page dans l’historique.' : 'Aucun favori enregistré.'));
   if (name === 'history' && items.length) {
     const clear = button('Effacer l’historique', () => {
@@ -253,6 +341,8 @@ function settings(next) {
     settingCheckbox(next, 'keepHistory', 'Conserver l’historique', 'Alimente les pages récentes et les sites les plus consultés.'),
     settingCheckbox(next, 'restoreTabs', 'Rouvrir les onglets au démarrage', 'Applicable à la fenêtre normale.'),
     settingCheckbox(next, 'dark', 'Thème sombre', 'Appliqué à l’interface OpenWeb.'),
+    settingCheckbox(next, 'animations', 'Animations de l’interface', 'Le réglage de réduction des mouvements du système reste prioritaire.'),
+    settingCheckbox(next, 'keepDownloads', 'Conserver la liste des téléchargements', 'Applicable à la fenêtre normale.'),
     row('Nouvel onglet', 'Active, réorganise et configure les modules.', [button('Personnaliser', () => panel('home'))]),
     row('Zoom de la page', `${Math.round(next.active.zoom * 100)} %`, [
       button('− 10 %', () => action('zoom', { value: -0.1 })),
@@ -260,6 +350,13 @@ function settings(next) {
       button('+ 10 %', () => action('zoom', { value: 0.1 })),
     ]),
   );
+
+  if (next.active.committed && /^https?:/.test(next.active.url)) {
+    navigation.append(row('Page active', '', [
+      button('Imprimer', () => action('page:print')),
+      button('Enregistrer en PDF', () => action('page:pdf')),
+    ]));
+  }
 
   const data = card('Données et outils');
   data.append(
@@ -399,13 +496,31 @@ function homeModules(next) {
 
 function downloads(next) {
   const list = card();
-  const labels = { progress: 'En cours', progressing: 'En cours', completed: 'Terminé', interrupted: 'Interrompu', cancelled: 'Annulé' };
+  const labels = {
+    progress: 'En cours', progressing: 'En cours', paused: 'En pause', completed: 'Terminé',
+    interrupted: 'Interrompu', cancelled: 'Annulé',
+  };
   if (!next.downloads.length) list.append(el('p', 'empty', 'Aucun téléchargement dans cette fenêtre.'));
+  if (next.downloads.some((item) => !item.active)) {
+    list.append(row('Liste des téléchargements', 'Les fichiers enregistrés restent sur ton disque.',
+      [button('Effacer les entrées terminées', () => action('download:clear'))]));
+  }
   for (const item of next.downloads) {
-    const controls = item.status === 'completed' ? [button('Afficher dans le dossier', () => action('download:show', { id: item.id }))]
-      : ['progress', 'progressing'].includes(item.status) ? [button('Annuler', () => action('download:cancel', { id: item.id }))] : [];
+    const controls = [];
+    if (item.status === 'completed') {
+      controls.push(button('Afficher dans le dossier', () => action('download:show', { id: item.id })));
+    }
+    if (item.active) {
+      if (item.resumable && ['paused', 'interrupted'].includes(item.status)) {
+        controls.push(button('Reprendre', () => action('download:resume', { id: item.id }), 'secondary'));
+      }
+      if (['progress', 'progressing'].includes(item.status)) {
+        controls.push(button('Mettre en pause', () => action('download:pause', { id: item.id })));
+      }
+      controls.push(button('Annuler', () => action('download:cancel', { id: item.id })));
+    }
     const itemRow = row(item.name, labels[item.status] ?? item.status, controls);
-    if (['progress', 'progressing'].includes(item.status)) {
+    if (item.active) {
       const progress = el('progress');
       progress.setAttribute('aria-label', `Progression de ${item.name}`);
       if (item.total > 0) {
@@ -530,10 +645,13 @@ function drawPanel(next, force = false) {
     bookmarks: next.bookmarks, history: next.history, downloads: next.downloads, extensions: next.extensions,
     home: [next.homeModules, next.shortcuts], reader: next.reader, settings: [next.settings, next.filterStatus, next.active.zoom], vault: [next.vault, next.active.url],
   };
-  const signature = JSON.stringify([name, relevant[name]]);
+  const signature = JSON.stringify([name, name === 'tabs' ? next.tabs : relevant[name]]);
   if (signature === panelKey && !force) return;
   if (state?.panel !== name) $('workspace').scrollTop = 0;
   panelKey = signature;
+  const lastTabSearch = name === 'tabs' ? $('tab-search') : null;
+  const wasSearching = Boolean(lastTabSearch && document.activeElement === lastTabSearch);
+  const previousTabQuery = lastTabSearch?.value ?? '';
   node.replaceChildren();
   if (!name) return;
   const head = el('header', 'panel-head');
@@ -545,14 +663,24 @@ function drawPanel(next, force = false) {
     bookmarks: () => links(name, next.bookmarks), history: () => links(name, next.history),
     downloads: () => downloads(next), extensions: () => extensions(next),
     settings: () => settings(next), vault: () => vault(next), reader: () => reader(next), home: () => editHome(next),
+    tabs: () => tabSearch(next, previousTabQuery),
   };
   node.append(head, ...contents[name]());
+  if (name === 'tabs' && (wasSearching || state?.panel !== name)) $('tab-search').focus({ preventScroll: true });
 }
 
 function render(next) {
   if (!next?.active) return;
   document.documentElement.classList.toggle('dark', next.dark);
   document.documentElement.classList.toggle('private', next.privateMode);
+  document.documentElement.classList.toggle('no-motion', !next.animations);
+  document.documentElement.classList.toggle('find-open', Boolean(next.find));
+  $('find-bar').hidden = !next.find;
+  if (!next.find) {
+    clearTimeout(findTimer);
+    $('find-text').value = '';
+  }
+  $('find-count').textContent = next.find?.query ? `${next.find.current} / ${next.find.matches}` : '';
   toolbar(next);
   tabs(next);
   $('home').hidden = Boolean(next.panel || !next.active.home);
@@ -609,4 +737,28 @@ document.querySelectorAll('[data-panel]').forEach((node) => node.addEventListene
 api.onState(render);
 api.onNotice(notice);
 api.onAddress(() => { address.focus(); address.select(); });
+api.onFind(() => {
+  const search = $('find-text');
+  search.focus();
+  search.select();
+});
+const findText = $('find-text');
+function submitFind(forward = true) {
+  clearTimeout(findTimer);
+  return action('find:query', { value: findText.value, forward });
+}
+findText.addEventListener('input', () => {
+  clearTimeout(findTimer);
+  findTimer = setTimeout(() => submitFind(), 75);
+});
+$('find-bar').addEventListener('submit', (event) => event.preventDefault());
+findText.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    void submitFind(!event.shiftKey);
+  }
+});
+$('find-prev').addEventListener('click', () => submitFind(false));
+$('find-next').addEventListener('click', () => submitFind());
+$('find-close').addEventListener('click', () => action('find:close'));
 void action('state');

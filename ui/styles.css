@@ -176,3 +176,56 @@ progress { display: block; width: min(180px, 100%); margin-top: 5px; accent-colo
   .shortcut-form { flex-wrap: wrap; }
   .shortcut-form .field { min-width: 130px; }
 }
+
+:root { --chrome-height: 106px; }
+:root.find-open { --chrome-height: 150px; }
+.chrome { height: var(--chrome-height); }
+.workspace { height: calc(100vh - var(--chrome-height)); }
+.tabs-tool { margin-bottom: 3px; }
+.tab.pinned { flex: 0 0 auto; min-width: 41px; }
+.tab.pinned .tab-select { padding: 0 11px; }
+.tab.pinned .tab-name { display: none; }
+.tab.pinned .tab-dot {
+  display: grid; place-items: center; width: 19px; height: 19px; border-radius: 5px;
+  background: var(--accent-soft); color: var(--accent-strong); opacity: 1; font-size: 11px; font-weight: 750;
+}
+.tab-audio { font-weight: 700; font-size: 15px; }
+.tab.drop-target { border-color: var(--accent); background: var(--accent-soft); }
+.load-progress { position: absolute; top: 103px; left: 0; right: 0; height: 2px; overflow: hidden; background: var(--accent-soft); }
+.load-progress::after {
+  content: ""; display: block; width: 35%; height: 100%;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  animation: loading-sweep 1.2s ease-in-out infinite;
+}
+@keyframes loading-sweep { from { transform: translateX(-100%); } to { transform: translateX(385%); } }
+
+.find-bar {
+  display: flex; align-items: center; justify-content: end; gap: 5px; height: 44px;
+  padding: 0 14px; background: var(--canvas); border-top: 1px solid var(--border);
+  animation: control-enter .16s ease-out both;
+}
+.find-bar input {
+  width: min(310px, 52vw); min-width: 0; height: 31px; border: 1px solid var(--border);
+  border-radius: 7px; background: var(--surface); padding: 5px 9px;
+}
+.find-bar output { min-width: 54px; color: var(--muted); text-align: center; font-variant-numeric: tabular-nums; }
+.find-bar button { font-size: 17px; }
+.tab-enter { animation: tab-enter .18s ease-out both; }
+.home:not([hidden]) .hero-mark { animation: mark-enter .34s cubic-bezier(.2, .85, .25, 1) both; }
+.home:not([hidden]) .home-search, .panel:not([hidden]), .notice:not([hidden]) {
+  animation: control-enter .20s ease-out both;
+}
+button, .address, .home-search {
+  transition: background-color .14s ease, color .14s ease, border-color .14s ease, box-shadow .14s ease;
+}
+@keyframes tab-enter { from { opacity: .3; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes mark-enter { from { opacity: .25; transform: translateY(10px) scale(.92); } to { opacity: 1; transform: none; } }
+@keyframes control-enter { from { opacity: .55; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+:root.no-motion *, :root.no-motion *::after, :root.no-motion *::before {
+  animation: none !important; transition: none !important; scroll-behavior: auto !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::after, *::before {
+    animation: none !important; transition: none !important; scroll-behavior: auto !important;
+  }
+}
