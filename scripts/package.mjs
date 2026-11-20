@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { chmod, copyFile, rename } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { packager } from '@electron/packager';
@@ -14,4 +15,12 @@ const output = await packager({
   asar: { unpack: '**/*.node' },
   ignore: /^\/(?:\.git(?:hub)?|dist|native|scripts|tests|node_modules)(?:\/|$)/,
 });
+if (process.platform === 'linux') {
+  for (const directory of output) {
+    const launcher = path.join(directory, 'OpenWeb');
+    await rename(launcher, path.join(directory, 'openweb-bin'));
+    await copyFile(new URL('./linux-launcher.sh', import.meta.url), launcher);
+    await chmod(launcher, 0o755);
+  }
+}
 console.log(output.join('\n'));

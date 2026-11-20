@@ -16,6 +16,8 @@ npm start
 
 `npm run package` crée une application portable dans `dist/` pour le système et l’architecture utilisés pour la compilation. Les archives de compilation sont aussi accessibles depuis les exécutions réussies dans [GitHub Actions](https://github.com/mathisbusanabussei359-web/openweb/actions). Les builds sont sans signature de distribution ni mise à jour automatique.
 
+Lance `OpenWeb.exe` sous Windows, `OpenWeb.app` sous macOS ou `./OpenWeb` depuis le dossier extrait sous Linux. Le lanceur Linux utilise le bac à sable Chromium fondé sur les espaces de noms utilisateur lorsque l’assistant setuid est indisponible. Sur une distribution qui restreint les espaces de noms pour les applications de bureau, l’assistant Chromium livré dans le paquet doit appartenir à `root:root` et être installé en mode `4755` par l’administrateur.
+
 ## Navigation
 
 - Onglets, favoris, historique, téléchargements, zoom et fenêtre privée avec une session en mémoire.
@@ -47,3 +49,5 @@ npm run test:desktop
 ```
 
 Le test de bureau utilise OpenSSL, un affichage graphique et un serveur HTTPS local. Il vérifie le parcours de navigation, le blocage réseau, le coffre, le chargement d’une extension Manifest V3 et l’isolation de la fenêtre privée. Le filtrage actuel agit sur le réseau, et les permissions comme la caméra, le micro et la localisation sont refusées par défaut.
+
+Le filtrage utilise la bibliothèque Rust adblock de Brave, distribuée sous MPL 2.0. [Code source de la bibliothèque](https://github.com/brave/adblock-rust/tree/v0.13.6)
