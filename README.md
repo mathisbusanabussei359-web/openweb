@@ -26,7 +26,7 @@ Lance `OpenWeb.exe` sous Windows, `OpenWeb.app` sous macOS ou `./OpenWeb` depuis
 
 ## Navigation privée via Tor
 
-1. Lance Tor sur ton ordinateur. Le mode automatique essaie le port SOCKS5 `9050` de Tor, puis le port `9150` généralement utilisé quand le Navigateur Tor est ouvert et connecté. Le réglage **Port SOCKS5 local** permet de choisir un autre port. [Télécharger Tor Browser](https://www.torproject.org/fr/download/)
+1. Lance Tor sur ton ordinateur. Le mode automatique essaie le port SOCKS5 `9050` de Tor, puis le port `9150` généralement utilisé quand le Navigateur Tor est ouvert et connecté. Le réglage **Port SOCKS5 local** permet de choisir un autre port. [Télécharger Tor Browser](https://www.torproject.org/download/)
 2. Ouvre une fenêtre privée dans OpenWeb. Chaque fenêtre utilise une session en mémoire avec son propre proxy SOCKS5, sans itinéraire de secours direct. OpenWeb envoie une requête de vérification via cette session à `check.torproject.org` avant d’autoriser la recherche ou l’ouverture d’une page.
 3. Si la vérification échoue, lance ou reconnecte Tor et clique sur **Vérifier Tor**. Si tu modifies le port, ouvre une nouvelle fenêtre privée.
 
