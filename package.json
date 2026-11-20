@@ -1,0 +1,22 @@
+{
+  "name": "openweb",
+  "productName": "OpenWeb",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Navigateur Chromium avec filtrage réseau et coffre local en Rust.",
+  "main": "app/main.cjs",
+  "scripts": {
+    "build": "node scripts/build-native.cjs",
+    "start": "electron .",
+    "test": "node --test tests/*.test.cjs",
+    "test:desktop": "electron tests/desktop.cjs",
+    "package": "npm run build && node scripts/package.mjs"
+  },
+  "devDependencies": {
+    "@electron/packager": "20.3.0",
+    "electron": "45.4.1"
+  },
+  "engines": {
+    "node": ">=22.12"
+  }
+}

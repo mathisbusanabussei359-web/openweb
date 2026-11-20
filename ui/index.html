@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; base-uri 'none'; form-action 'none'">
+  <title>OpenWeb</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="chrome.js" defer></script>
+</head>
+<body>
+  <header class="chrome">
+    <div class="strip">
+      <span class="mini-mark" aria-hidden="true"></span>
+      <div id="tabs" class="tabs" role="tablist" aria-label="Onglets"></div>
+      <button class="icon new-tab" id="new-tab" type="button" aria-label="Nouvel onglet" title="Nouvel onglet">+</button>
+      <span id="private-label" class="private-label" hidden>Privé</span>
+    </div>
+    <nav class="toolbar" aria-label="Commandes du navigateur">
+      <div class="nav-cluster">
+        <button class="icon" id="back" type="button" aria-label="Précédent" title="Précédent">←</button>
+        <button class="icon" id="forward" type="button" aria-label="Suivant" title="Suivant">→</button>
+        <button class="icon" id="reload" type="button" aria-label="Recharger" title="Recharger">↻</button>
+      </div>
+      <form id="address-form" class="address" autocomplete="off">
+        <span id="protocol" class="protocol" hidden></span>
+        <input type="text" id="address" aria-label="Adresse ou recherche" placeholder="Saisir une adresse ou une recherche" spellcheck="false" dir="ltr">
+        <button class="icon star regular-only" id="bookmark-toggle" type="button" aria-label="Ajouter aux favoris" title="Ajouter aux favoris">☆</button>
+      </form>
+      <div class="tools">
+        <button class="icon shield" id="shield" type="button" data-panel="settings" title="Réglages de confidentialité" aria-label="Réglages de confidentialité"><span class="shield-icon" aria-hidden="true">✓</span><span id="blocked" aria-hidden="true" hidden></span></button>
+        <button class="icon" type="button" data-panel="reader" title="Mode lecture" aria-label="Mode lecture"><span class="reader-icon" aria-hidden="true">≡</span></button>
+        <button class="icon regular-only" type="button" data-panel="bookmarks" title="Favoris" aria-label="Favoris">☆</button>
+        <button class="icon regular-only" type="button" data-panel="vault" title="Coffre de mots de passe" aria-label="Coffre de mots de passe"><span class="lock-icon" aria-hidden="true"></span></button>
+        <button class="icon" type="button" data-panel="downloads" title="Téléchargements" aria-label="Téléchargements">↓</button>
+        <button class="icon regular-only" type="button" data-panel="settings" title="Paramètres" aria-label="Paramètres">⚙︎</button>
+      </div>
+    </nav>
+  </header>
+  <main id="workspace" class="workspace">
+    <section id="home" class="home">
+      <div class="home-inner">
+        <span class="hero-mark" aria-hidden="true"></span>
+        <h1 id="home-title">OpenWeb</h1>
+        <p id="private-note" class="muted" hidden>Les cookies et l’historique de cette fenêtre sont effacés à sa fermeture.</p>
+        <form id="home-search" class="home-search" autocomplete="off">
+          <span class="search-icon" aria-hidden="true"></span>
+          <input type="text" id="query" aria-label="Rechercher sur le Web ou saisir une adresse" placeholder="Rechercher sur le Web" spellcheck="false">
+          <button type="submit" aria-label="Lancer la recherche" title="Lancer la recherche">→</button>
+        </form>
+        <nav class="quick regular-only" aria-label="Accès rapides">
+          <button type="button" data-panel="bookmarks"><span aria-hidden="true">☆</span>Favoris</button>
+          <button type="button" data-panel="history"><span aria-hidden="true">◷</span>Historique</button>
+          <button type="button" data-panel="extensions"><span aria-hidden="true">⊞</span>Extensions</button>
+          <button type="button" id="private-window"><span aria-hidden="true">◐</span>Fenêtre privée</button>
+        </nav>
+        <div id="home-bookmarks" class="home-bookmarks"></div>
+      </div>
+    </section>
+    <section id="error-page" class="error-page" hidden>
+      <div>
+        <h1>Impossible d’ouvrir cette page</h1>
+        <p id="load-error" class="muted"></p>
+        <button class="primary" id="retry" type="button">Réessayer</button>
+      </div>
+    </section>
+    <section id="panel" class="panel" aria-label="Outils OpenWeb" hidden></section>
+  </main>
+  <div id="notice" class="notice" role="status" hidden></div>
+</body>
+</html>
